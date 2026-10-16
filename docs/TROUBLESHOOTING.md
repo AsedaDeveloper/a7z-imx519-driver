@@ -16,6 +16,6 @@
 
 ## Collecting information for a bug report
 ```bash
-uname -r; lsmod | grep -E "imx519|ak7375|vin"; dmesg | grep -iE "imx519|vin:|ak7375" | tail -40
-ls /boot/dtbo | grep -v disabled; modinfo -n vin_v4l2 vin_io
+bash scripts/collect-info.sh
 ```
+Paste the whole output into the issue (it contains no passwords or Wi-Fi names). Other boards, kernels or modules: see [TESTED.md](TESTED.md).

@@ -1,0 +1,29 @@
+name: Tested setup report
+description: You tried it on a board / kernel / module that is not in docs/TESTED.md (works or not)
+labels: [tested-setup]
+body:
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: ["Works fully", "Works partly", "Does not work"]
+    validations: {required: true}
+  - type: input
+    id: board
+    attributes: {label: "Board (e.g. Radxa Cubie A7A)"}
+    validations: {required: true}
+  - type: input
+    id: os
+    attributes: {label: "OS image and kernel (uname -r)"}
+    validations: {required: true}
+  - type: input
+    id: module
+    attributes: {label: "Camera module + cable"}
+    validations: {required: true}
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What you changed (overlay pins, flags like --force), which modes/features worked, and the output of scripts/collect-info.sh
+      render: text
+    validations: {required: true}

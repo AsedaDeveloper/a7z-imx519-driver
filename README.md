@@ -73,7 +73,7 @@ v4l2-ctl -d /dev/video0 --set-input=0 --list-ctrls
 ```
 
 Details, options and removal: [docs/INSTALL.md](docs/INSTALL.md), [docs/USAGE.md](docs/USAGE.md),
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). How and why it works (read this if you port it to another
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), [docs/TESTED.md](docs/TESTED.md) (what has and has not been tested - reports welcome). How and why it works (read this if you port it to another
 sensor): [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## What is in this repository
@@ -83,9 +83,10 @@ driver/imx519_mipi.c     sensor driver for the Allwinner VIN framework (GPL-2.0)
 driver/ak7375_act.c      autofocus lens motor driver (VIN "actuator" subdevice) (GPL-2.0)
 overlay/imx519-j5.dts    device-tree overlay for connector J5 (csi1/mipi1, TWI3 at 100 kHz, PE8/PE9)
 patches/                 patch for the BSP's VIN core (stops kernel crashes with standard V4L2 tools)
-scripts/                 install.sh, uninstall.sh, udev rule
+scripts/                 install.sh, uninstall.sh, collect-info.sh (for bug reports), udev rule
 tools/a7zcam.py          still / raw DNG / focus tool + library      (MIT)
 tools/liveview.py        web live view with AE, AWB, autofocus       (MIT)
+tests/                   unit tests for the calibration code (no camera needed): python3 -m unittest discover -s tests
 docs/                    install, usage, hardware, troubleshooting, how it works
 ```
 

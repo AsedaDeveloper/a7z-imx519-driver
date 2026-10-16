@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installer for the IMX519 (Waveshare / Arducam 16 MP autofocus module) on the Radxa Cubie A7Z.
 #
-#   sudo ./scripts/install.sh [--no-vin-patch] [--bsp-dir DIR] [--work-dir DIR] [--no-overlay] [--no-tools] [--dry-run]
+#   sudo ./scripts/install.sh [--no-vin-patch] [--bsp-dir DIR] [--work-dir DIR] [--no-overlay] [--no-tools] [--dry-run] [--force]
 #
 # What it does (each step is idempotent, it is safe to run it again):
 #   1. checks the system (Radxa Debian, kernel headers, build tools)
@@ -21,7 +21,7 @@ BSP_TAG="cubie-aiot-v1.5.0"
 BSP_URL="https://github.com/radxa/allwinner-bsp.git"
 WORK="/opt/a7z-imx519-driver"
 BSP="${WORK}/bsp"
-PATCH_VIN=1; DO_OVERLAY=1; DO_TOOLS=1; DRY=0
+PATCH_VIN=1; DO_OVERLAY=1; DO_TOOLS=1; DRY=0; FORCE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,7 +31,8 @@ while [ $# -gt 0 ]; do
     --bsp-dir)      BSP="$2"; shift ;;
     --work-dir)     WORK="$2"; BSP="${WORK}/bsp"; shift ;;
     --dry-run)      DRY=1 ;;
-    -h|--help)      sed -n '2,16p' "$0"; exit 0 ;;
+    --force)        FORCE=1 ;;   # continue even if the board / kernel is not the tested one
+    -h|--help)      sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -46,10 +47,26 @@ run()  { if [ "$DRY" = 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
 
 # ------------------------------------------------------------------------------------------------ 1. checks
 say "1/7 checking the system"
-grep -qi "a7z\|cubie" /proc/device-tree/model 2>/dev/null || warn "this does not look like a Radxa Cubie A7Z ($(tr -d '\0' </proc/device-tree/model 2>/dev/null))"
-[ "$KVER" = "6.6.98-5-aw2511" ] || warn "tested only with kernel 6.6.98-5-aw2511 (running $KVER); other kernels may need source changes"
+MODEL="$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || true)"
+COMPAT="$(cat /proc/device-tree/compatible 2>/dev/null | tr '\0' ' ' || true)"
+if ! echo "$MODEL $COMPAT" | grep -qi "a7z"; then
+  [ "$FORCE" = 1 ] && warn "this does not look like a Radxa Cubie A7Z (model: '${MODEL:-unknown}'), continuing because of --force" \
+    || die "this does not look like a Radxa Cubie A7Z (model: '${MODEL:-unknown}'). The overlay is specific to connector J5 of the A7Z. Use --force to override."
+fi
+if [ "$KVER" != "6.6.98-5-aw2511" ]; then
+  [ "$FORCE" = 1 ] && warn "tested only with kernel 6.6.98-5-aw2511 (running $KVER), continuing because of --force" \
+    || die "tested only with kernel 6.6.98-5-aw2511 (running $KVER). Modules built for another kernel may not load or may crash. Use --force to try anyway and please report the result (docs/TESTED.md)."
+fi
 [ -d "$KBUILD" ] || die "kernel headers missing: apt install linux-headers-${KVER}  (or linux-headers-radxa-a733)"
 for t in git make gcc dtc patch python3 xz strip; do command -v "$t" >/dev/null || die "missing tool '$t' (apt install git build-essential device-tree-compiler patch python3 xz-utils binutils)"; done
+[ -d /boot/dtbo ] || [ "$DO_OVERLAY" = 0 ] || die "/boot/dtbo not found: this image does not use u-boot overlays, so install.sh cannot enable the camera (use --no-overlay and add the overlay by hand)"
+FREE_MB=$(df -Pm "$(dirname "$WORK")" 2>/dev/null | awk 'NR==2{print $4}')
+[ -z "${FREE_MB:-}" ] || [ "$FREE_MB" -ge 1500 ] || die "only ${FREE_MB} MB free where $WORK will live; about 1500 MB are needed for the BSP source and the build"
+if [ ! -d "$BSP/drivers/vin" ]; then
+  git ls-remote --exit-code --tags "$BSP_URL" "refs/tags/$BSP_TAG" >/dev/null 2>&1 \
+    || die "cannot reach $BSP_URL (tag $BSP_TAG). Check the network, or pass --bsp-dir with an existing checkout."
+fi
+if [ -e /dev/video0 ] && fuser /dev/video0 >/dev/null 2>&1; then warn "/dev/video0 is in use (live view?). Stop it before rebooting; the install itself is not affected."; fi
 mkdir -p "$WORK"
 
 # ------------------------------------------------------------------------------------------------ 2. BSP source
@@ -61,6 +78,13 @@ else
   run git -C "$BSP" sparse-checkout set drivers/vin include
 fi
 [ "$DRY" = 1 ] || [ -f "$BSP/drivers/vin/vin.c" ] || die "BSP tree incomplete ($BSP)"
+if [ "$PATCH_VIN" = 1 ] && [ -f "$BSP/drivers/vin/vin.c" ]; then
+  # fail early (before any build) if the VIN patch does not fit this BSP revision
+  patch -p1 --dry-run -s -d "$BSP" < "$REPO/patches/vin_core_fixes.patch" >/dev/null 2>&1 \
+    && echo "VIN patch applies cleanly to this BSP tree" \
+    || { [ "$FORCE" = 1 ] && warn "VIN patch does not apply to this BSP tree (continuing: --force)" \
+         || die "VIN patch does not apply to this BSP revision ($BSP). Re-run with --no-vin-patch, or use the tag $BSP_TAG."; }
+fi
 
 VINCFLAGS() { # include paths shared by all builds
   local d="$1"

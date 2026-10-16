@@ -14,7 +14,9 @@ sudo ./scripts/install.sh            # add --no-vin-patch to skip the VIN patch 
 sudo reboot
 ```
 Options: `--work-dir DIR` (build area, default `/opt/a7z-imx519-driver`), `--bsp-dir DIR` (reuse an existing BSP checkout),
-`--no-overlay`, `--no-tools`, `--dry-run`.
+`--no-overlay`, `--no-tools`, `--dry-run`, `--force`.
+
+Before building, the installer now checks that the board is an A7Z, that the kernel is the tested one (6.6.98-5-aw2511), that headers, tools, disk space (1.5 GB) and the network are available, and that the VIN patch fits the BSP tree; it stops with a clear message if not. `--force` overrides the board and kernel checks (at your own risk; please report the result, see [TESTED.md](TESTED.md)).
 
 What it installs: `imx519_mipi.ko` + `ak7375_act.ko` in `/lib/modules/<kernel>/extra/`, patched `vin_io.ko` +
 `vin_v4l2.ko` in `/lib/modules/<kernel>/updates/` (they take precedence; the originals stay in `kernel/`), the overlay
