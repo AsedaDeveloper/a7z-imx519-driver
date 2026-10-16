@@ -42,11 +42,18 @@ lc-a7z gst-launch-1.0 -e libcamerasrc ! video/x-raw,format=RGBA,width=1916,heigh
 * **Controls:** the patched soft IPA now also exposes `AeEnable`, `ExposureTime` (microseconds) and `AnalogueGain`, verified
   from Python (`cam.create_request().set_control(...)`); the values are read back correctly in the request metadata.
   Autofocus (`LensPosition`, `AfMode`) is still not available through libcamera; use `a7zcam` / V4L2 for that.
-* **Known issue: frame period in manual-exposure mode is unreliable** (varies run to run and sometimes within a run,
-  independent of the `ExposureTime` requested, converging to a steady value after a few frames in most but not all
-  cases). The control value itself and its readback are correct; only the resulting real frame rate is not. Not yet
-  root-caused beyond ruling out the sensor driver's persistent VBLANK state (fixed: it is now reset on every stream
-  stop, see `driver/imx519_mipi.c` `sensor_s_stream`). Auto-exposure mode (`AeEnable=true`) is not affected.
+* **Known limitation: effective frame rate is lower than the sensor's, and varies between runs (root-caused).**
+  The sensor driver and the exposure/gain math are exact: a 20 ms request writes exactly 1416 lines (20.00 ms at
+  1080p's line time). What varies is the *delivered* frame period, and it is always a small-integer multiple of that
+  true per-frame time (2x = 40.9 ms, 5x = 102.2 ms measured repeatedly), steady within one run but different between
+  runs. Cause: the software ISP's demosaic + colour-matrix + gamma pipeline is single-threaded and, at 1080p, costs
+  close to the sensor's own frame time to run (measured ~90 % of one CPU core while capturing); the VIN's buffer
+  queue then has to skip frames to let the (slower) software consumer catch up, and exactly how many frames get
+  skipped depends on buffer/scheduling state at stream start - hence consistent within a run, different between
+  runs. This is a **performance** limitation of the unaccelerated (no NEON, single-threaded) software ISP on this
+  SoC, not a correctness bug in the driver or the exposure/gain controls. A real fix is ISP performance work (SIMD
+  demosaic, multiple worker threads) rather than a small patch; not attempted here. Auto-exposure mode is governed by
+  the same mechanism and is not meaningfully different.
 * **Fixed (previously crashed on camera stop/restart):** a second `start()`/`stop()` cycle in the same process used to
   abort or crash the kernel. Root causes: `IPASoftSimple::processStats` read sensor controls unconditionally even when
   none were available yet after a reset; `SimpleCameraData::imageBufferReady`/`conversionOutputDone` dereferenced a
