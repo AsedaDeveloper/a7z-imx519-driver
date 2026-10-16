@@ -6,7 +6,7 @@ Linux driver, device-tree overlay and tools for the **Sony IMX519 16 MP autofocu
 
 > **Status: beta.** It captures real images, runs manual exposure up to minutes, does contrast autofocus and a live
 > view, and has survived stress tests. It is **not** a drop-in replacement for the Raspberry Pi camera stack:
-> there is no hardware ISP, no libcamera pipeline, no automatic colour tuning. See [What works](#what-works) and
+> there is no hardware ISP (processing is done on the CPU); libcamera support is new and limited. See [What works](#what-works) and
 > [Known limitations](#known-limitations) before you build on it.
 
 Raspberry Pi OS supports this module out of the box. The Allwinner A733 does not: Radxa ships no IMX519 driver, the
@@ -28,6 +28,7 @@ has a few traps that cost the author days. This repository documents and fixes a
 | Sensor test pattern as the standard `test_pattern` V4L2 control | works |
 | Lens-shading calibration + dark-frame / hot-pixel correction (`a7zcam lsc-calibrate`, `a7zcam dark`) | works on synthetic data and a smoke test; needs your own calibration shots |
 | H.264 video recording with the **hardware encoder** (Allwinner Cedar VE): 1080p at 30 fps, 720p 30 fps, 4K ~17 fps | works (`a7zcam video`; needs GStreamer + the Allwinner OMX plugin, otherwise falls back to software x264 at ~17 fps) |
+| **libcamera** (`cam`, GStreamer `libcamerasrc`, Python bindings) with software ISP: auto exposure, white balance, colour | works, beta (`scripts/build-libcamera.sh`, see [docs/LIBCAMERA.md](docs/LIBCAMERA.md)); Picamera2 not supported |
 | Virtual webcam `/dev/video20` (YUYV 1080p30) for browsers, ffmpeg, OpenCV, Frigate | works (`a7zcam webcam`, needs `v4l2loopback`) |
 | Web live view with exposure, gain, focus, AE, AWB, autofocus | works (`a7zcam live`) |
 | Long-exposure / astro use (persistent stream, no wasted first frame) | works, see [docs/USAGE.md](docs/USAGE.md) |

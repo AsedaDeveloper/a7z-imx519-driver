@@ -21,8 +21,8 @@ Run `tools/a7zcam-live.service` as a systemd unit if you want it at boot.
 ## Standard V4L2
 ```bash
 v4l2-ctl -d /dev/video0 --set-input=0 --list-ctrls
-# one capture with manual exposure (value = lines x 16; 1 line = 14.13 us at 1080p) and focus:
-v4l2-ctl -d /dev/video0 --set-input=0 --set-ctrl=exposure=$((1500*16)),gain=64,focus_absolute=60 \
+# one capture with manual exposure (value in lines; 1 line = 14.13 us at 1080p) and focus:
+v4l2-ctl -d /dev/video0 --set-input=0 --set-ctrl=exposure=1500,gain=64,focus_absolute=60 \
          --set-fmt-video=width=1920,height=1080,pixelformat=RG10 --stream-mmap=4 --stream-skip=4 --stream-count=1 --stream-to=frame.raw
 ```
 * `gain` is gain × 16 (16 = 1×, 1024 = 64×); `exposure` is exposure lines × 16; `focus_absolute` 0..127.

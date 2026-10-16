@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: CC0-1.0
+# libcamera software-ISP tuning for the IMX519 on the Allwinner VIN (a7z-imx519-driver).
+# Black level 64/1023 (10-bit) = 4096 on libcamera's 16-bit scale. Colour matrices: Raspberry Pi imx519 tuning
+# (BSD-2-Clause, libcamera project) blended 60 % with identity, as in a7zcam (full strength is over-saturated).
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+      blackLevel: 4096
+  - Awb:
+  - Ccm:
+      ccms:
+        - ct: 2890
+          ccm: [ 1.2205, -0.1107, -0.1098, -0.1941, 1.2690, -0.0748, -0.0025, -0.4196, 1.4221 ]
+        - ct: 2920
+          ccm: [ 1.1602, 0.0097, -0.1700, -0.1711, 1.2336, -0.0625, -0.0291, -0.4933, 1.5224 ]
+        - ct: 3550
+          ccm: [ 1.2570, -0.1634, -0.0936, -0.1725, 1.2464, -0.0740, -0.0109, -0.3291, 1.3400 ]
+        - ct: 4500
+          ccm: [ 1.2180, -0.1174, -0.1006, -0.1515, 1.3135, -0.1620, -0.0095, -0.3189, 1.3284 ]
+        - ct: 5700
+          ccm: [ 1.2952, -0.2235, -0.0718, -0.1290, 1.2400, -0.1111, -0.0227, -0.2327, 1.2554 ]
+        - ct: 7900
+          ccm: [ 1.2091, -0.0325, -0.1765, -0.1331, 1.4661, -0.3330, -0.0444, -0.3320, 1.3764 ]
+  - Lut:
+  - Agc:
+...

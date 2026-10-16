@@ -1446,6 +1446,7 @@ static int imx519_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *stat
 
 static int sensor_g_ctrl(struct v4l2_ctrl *ctrl)
 {
+	int ret;
 	struct sensor_info *info =
 			container_of(ctrl->handler, struct sensor_info, handler);
 	struct v4l2_subdev *sd = &info->sd;
@@ -1454,7 +1455,9 @@ static int sensor_g_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_GAIN:
 		return sensor_g_gain(sd, &ctrl->val);
 	case V4L2_CID_EXPOSURE:
-		return sensor_g_exp(sd, &ctrl->val);
+		ret = sensor_g_exp(sd, &ctrl->val);
+		ctrl->val >>= 4;			/* lines */
+		return ret;
 	}
 	return -EINVAL;
 }
@@ -1469,7 +1472,7 @@ static int sensor_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_GAIN:
 		return sensor_s_gain(sd, ctrl->val);
 	case V4L2_CID_EXPOSURE:
-		return sensor_s_exp(sd, ctrl->val);
+		return sensor_s_exp(sd, ctrl->val << 4);	/* control: lines (V4L2 standard); internal: lines x 16 */
 	case V4L2_CID_PIXEL_RATE:
 	case V4L2_CID_HBLANK:
 		return 0;				/* read-only: fixed by the mode */
@@ -1579,8 +1582,8 @@ static int sensor_init_controls(struct v4l2_subdev *sd, const struct v4l2_ctrl_o
 
 	v4l2_ctrl_handler_init(handler, 7 + ARRAY_SIZE(sensor_custom_ctrls));
 
-	ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_EXPOSURE, 0,
-			      0x7ffffff, 1, 0);		/* about 8 million lines: long exposures */
+	ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_EXPOSURE, 1,
+			      0x7fffff, 1, 1000);	/* in lines (V4L2 standard); up to ~8 million lines with the long-exposure shift */
 	(void)ctrl;	/* not volatile: the value last set is the value reported */
 	v4l2_ctrl_new_std(handler, ops, V4L2_CID_GAIN, 16,
 			      IMX519_GAIN_MAX_X16, 1, 16);		/* gain x16: 16 = 1x ... 1024 = 64x */

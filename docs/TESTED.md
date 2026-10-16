@@ -6,7 +6,7 @@ paste the output of `scripts/collect-info.sh`.
 
 | Board | OS / kernel | Camera module | Result | Reported by |
 |---|---|---|---|---|
-| Radxa Cubie A7Z (2 GB) | Radxa Debian 13 "trixie" CLI (rsdk-t6), kernel 6.6.98-5-aw2511, BSP tag `cubie-aiot-v1.5.0` | Waveshare IMX519-78 16 MP AF, Radxa cable AC008-270 on connector J5 | **Works**: all five modes up to 4656x3496, exposure to 15 s measured (hardware to ~118 s), gain to 64x, autofocus, DNG, live view; 60/60 open-stream-close cycles | author |
+| Radxa Cubie A7Z (2 GB) | Radxa Debian 13 "trixie" CLI (rsdk-t6), kernel 6.6.98-5-aw2511, BSP tag `cubie-aiot-v1.5.0` | Waveshare IMX519-78 16 MP AF, Radxa cable AC008-270 on connector J5 | **Works**: all five modes up to 4656x3496, exposure to 15 s measured (hardware to ~118 s), gain to 64x, autofocus, DNG, live view; 60/60 open-stream-close cycles; hardware H.264, virtual webcam, rpicam wrappers; libcamera v0.5.2 (patched) `cam`, `libcamerasrc`, Python | author |
 | Radxa Cubie A7A / A7S | - | IMX519 | **Not tested.** The overlay is very likely close (the J5-style csi1/mipi1 wiring came from the A7A overlays) but the connector pins may differ | - |
 | Radxa Cubie A7Z | other kernels / newer Radxa images | IMX519 | **Not tested.** `install.sh` refuses other kernels unless you pass `--force` | - |
 | Radxa Cubie A7Z | any | Arducam IMX519 (non-Waveshare, different oscillator / lens motor) | **Not tested.** The lens motor driver assumes an AK7375 at I2C 0x0c | - |

@@ -1,6 +1,6 @@
 diff -ruN a/drivers/vin/vin-isp/sunxi_isp.c b/drivers/vin/vin-isp/sunxi_isp.c
---- a/drivers/vin/vin-isp/sunxi_isp.c	2026-10-16 05:48:51.084000049 +0000
-+++ b/drivers/vin/vin-isp/sunxi_isp.c	2026-10-16 05:48:51.088000049 +0000
+--- a/drivers/vin/vin-isp/sunxi_isp.c	2026-10-16 15:09:14.180000019 +0000
++++ b/drivers/vin/vin-isp/sunxi_isp.c	2026-10-16 15:09:14.184000019 +0000
 @@ -65,8 +65,8 @@
  
  #define MIN_IN_WIDTH			192
@@ -24,9 +24,38 @@ diff -ruN a/drivers/vin/vin-isp/sunxi_isp.c b/drivers/vin/vin-isp/sunxi_isp.c
  		}
  
 diff -ruN a/drivers/vin/vin-video/vin_video.c b/drivers/vin/vin-video/vin_video.c
---- a/drivers/vin/vin-video/vin_video.c	2026-10-16 05:48:51.072000049 +0000
-+++ b/drivers/vin/vin-video/vin_video.c	2026-10-16 05:48:51.076000049 +0000
-@@ -2468,6 +2468,24 @@
+--- a/drivers/vin/vin-video/vin_video.c	2026-10-16 15:09:14.164000019 +0000
++++ b/drivers/vin/vin-video/vin_video.c	2026-10-16 15:09:14.168000019 +0000
+@@ -703,7 +703,6 @@
+ 	strcpy(cap->driver, "sunxi-vin");
+ 	strcpy(cap->card, "sunxi-vin");
+ 
+-	cap->version = VIN_VERSION;
+ 	cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING |
+ 			V4L2_CAP_READWRITE | V4L2_CAP_DEVICE_CAPS;
+ 
+@@ -741,15 +740,12 @@
+ 	ret = v4l2_subdev_call(vinc->vid_cap.pipe.sd[VIN_IND_SENSOR], pad,
+ 				enum_frame_size, NULL, &fse);
+ 	if (ret < 0)
+-		return -1;
++		return -EINVAL;		/* end of the list (V4L2 requires EINVAL, not -1/EPERM) */
+ 
+-	fsize->type = V4L2_FRMSIZE_TYPE_CONTINUOUS;
+-	fsize->stepwise.min_width = MIN_IN_WIDTH;
+-	fsize->stepwise.min_height = MIN_IN_HEIGHT;
+-	fsize->stepwise.step_width = 2;
+-	fsize->stepwise.max_width = fse.max_width;
+-	fsize->stepwise.max_height = fse.max_height;
+-	fsize->stepwise.step_height = 2;
++	/* one discrete size per sensor mode (a stepwise range would be only valid for index 0) */
++	fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
++	fsize->discrete.width = fse.max_width;
++	fsize->discrete.height = fse.max_height;
+ 
+ 	return 0;
+ }
+@@ -2468,6 +2464,24 @@
  	v4l2_ctrl_handler_setup(cap->pipe.sd[VIN_IND_SENSOR]->ctrl_handler);
  	 */
  
@@ -51,7 +80,7 @@ diff -ruN a/drivers/vin/vin-video/vin_video.c b/drivers/vin/vin-video/vin_video.
  	vinc->hflip = inst->hflip;
  	vinc->vflip = inst->vflip;
  
-@@ -3884,11 +3902,18 @@
+@@ -3884,11 +3898,18 @@
  	struct sensor_instance *inst = get_valid_sensor(cap->vinc);
  	struct v4l2_subdev *sensor = cap->pipe.sd[VIN_IND_SENSOR];
  	struct v4l2_subdev *flash = cap->pipe.sd[VIN_IND_FLASH];
@@ -71,7 +100,7 @@ diff -ruN a/drivers/vin/vin-video/vin_video.c b/drivers/vin/vin-video/vin_video.
  		switch (ctrl->id) {
  		case V4L2_CID_EXPOSURE:
  			v4l2_g_ctrl(sensor->ctrl_handler, &c);
-@@ -4146,6 +4171,13 @@
+@@ -4146,6 +4167,13 @@
  	int ret = 0;
  
  	/*
@@ -85,7 +114,7 @@ diff -ruN a/drivers/vin/vin-video/vin_video.c b/drivers/vin/vin-video/vin_video.
  	 * make sure g_ctrl will get the value that hardware is using
  	 * so that ctrl->flags should be V4L2_CTRL_FLAG_VOLATILE, after s_ctrl
  	  */
-@@ -4237,7 +4269,8 @@
+@@ -4237,7 +4265,8 @@
  		break;
  	}
  
@@ -96,8 +125,8 @@ diff -ruN a/drivers/vin/vin-video/vin_video.c b/drivers/vin/vin-video/vin_video.
  		case V4L2_CID_BRIGHTNESS:
  		case V4L2_CID_CONTRAST:
 diff -ruN a/drivers/vin/vin-vipp/sunxi_scaler.c b/drivers/vin/vin-vipp/sunxi_scaler.c
---- a/drivers/vin/vin-vipp/sunxi_scaler.c	2026-10-16 05:48:51.092000049 +0000
-+++ b/drivers/vin/vin-vipp/sunxi_scaler.c	2026-10-16 05:48:51.092000049 +0000
+--- a/drivers/vin/vin-vipp/sunxi_scaler.c	2026-10-16 15:09:14.200000019 +0000
++++ b/drivers/vin/vin-vipp/sunxi_scaler.c	2026-10-16 15:09:14.204000019 +0000
 @@ -32,13 +32,13 @@
  
  #define MIN_IN_WIDTH			192

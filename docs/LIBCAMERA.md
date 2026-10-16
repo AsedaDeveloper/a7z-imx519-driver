@@ -1,33 +1,64 @@
 # libcamera / Raspberry Pi application compatibility
 
-**Status: in progress.** libcamera is not usable with this camera yet. What exists today:
+**Status: libcamera works (beta).** With the patched libcamera build in this repository the camera is a normal
+libcamera camera: `cam`, GStreamer `libcamerasrc` and the libcamera Python bindings see it and get processed RGB
+frames with automatic exposure, white balance and colour correction (libcamera's *software ISP*, running on the CPU).
 
-| Raspberry Pi thing | Equivalent here |
-|---|---|
-| `rpicam-still`, `rpicam-vid`, `rpicam-hello` (and the old `libcamera-*` names) | `rpicam.py` translates the common options onto `a7zcam` (installed as `/usr/local/bin/rpicam-still` etc.). Not libcamera. |
-| Picamera2 (Python) | not available; use `a7zcam.Camera` (see USAGE.md) |
-| Hardware H.264 encoder | works, see USAGE.md ("Video") |
-| A normal V4L2 webcam for browsers / ffmpeg / OpenCV / Frigate | works: `a7zcam webcam` |
-| libcamera (`cam`, GStreamer `libcamerasrc`, PipeWire, Picamera2) | **not working; plan below** |
+| Raspberry Pi thing | Here | Status |
+|---|---|---|
+| libcamera `cam -l` / capture | `lc-a7z cam -l`, `lc-a7z cam -c1 -C30 -s width=1920,height=1080,pixelformat=BGR888 --file=f-#.ppm` | **works** (1080p 30 fps in good light) |
+| GStreamer `libcamerasrc` | `lc-a7z gst-launch-1.0 libcamerasrc ! video/x-raw,format=RGBA,width=1916,height=1080 ! ...` | **works**, also into the hardware H.264 encoder (see below) |
+| libcamera Python bindings | `lc-a7z python3 -c "import libcamera"` | **works** (camera, properties, capture) |
+| Picamera2 | - | **not supported**: Picamera2 needs the Raspberry Pi pipeline handler / ISP |
+| `rpicam-still/vid/hello` | `rpicam.py` wrappers on top of `a7zcam` (not libcamera) | works for the common options |
+| Hardware H.264 | `a7zcam video`, or GStreamer `omxh264videoenc` | works |
+| Webcam for browsers / ffmpeg / OpenCV | `a7zcam webcam` (/dev/video20) | works |
 
-## Why libcamera finds no camera
-`cam -l` (libcamera 0.4 from Debian) lists nothing. Pipeline handlers are compiled into libcamera, and none of them knows
-the Allwinner `sunxi-vin` media device. A new handler is required. Findings that decide whether that is practical
-(all measured on the A7Z):
+## Install
+```bash
+sudo ./scripts/build-libcamera.sh        # ~30-40 min on the A7Z; installs into /opt/libcamera-a7z
+lc-a7z cam -l                             # lc-a7z = wrapper that points programs at that build
+```
+The Debian `libcamera` packages are not touched; programs started without `lc-a7z` keep using them (and see no camera).
+The build needs the kernel side from `install.sh` (sensor driver with the standard controls and the patched VIN).
 
-* `/dev/video0` is a multi-planar capture node. `S_FMT` (SRGGB10), `REQBUFS` (MMAP **and** DMABUF) and `EXPBUF` all work: good,
-  that is exactly what libcamera needs for its buffers.
-* The sensor sub-device (`/dev/v4l-subdev0`) supports `ENUM_MBUS_CODE` (SRGGB10_1X10), `ENUM_FRAME_SIZE` (the four sensor modes) and `G_FMT`.
-* The rest of the VIN chain (mipi, csi, scaler, `vin_cap` sub-devices) is configured by the driver itself when `/dev/video0`
-  is set up; the media graph has odd duplicated links, so libcamera's generic "simple" handler (which walks the graph and sets
-  a format on every sub-device) is unlikely to work unchanged.
-* libcamera's `CameraSensor` requires the standard controls `PIXEL_RATE`, `HBLANK`, `VBLANK`, `EXPOSURE` (in lines) and
-  `ANALOGUE_GAIN` (register code). The driver today has `exposure` (lines x 16, BSP convention), `gain` (x16) and `frame_rate` only.
-* No ISP: libcamera's software ISP (CPU, Bayer to RGB with simple auto exposure / white balance) would do the processing.
+## Examples
+```bash
+# 10 RGB frames at 1080p
+lc-a7z cam -c1 -C10 -s width=1920,height=1080,pixelformat=BGR888 --file=frame-#.ppm --metadata
+# libcamera -> hardware H.264 (the software ISP crops 2 px per side, so 1920 becomes 1916; scale back for the encoder)
+lc-a7z gst-launch-1.0 -e libcamerasrc ! video/x-raw,format=RGBA,width=1916,height=1080 ! queue ! videoconvert ! videoscale \
+   ! video/x-raw,width=1920,height=1080,format=NV12 ! identity drop-allocation=true ! queue ! omxh264videoenc \
+   ! h264parse ! mp4mux ! filesink location=clip.mp4
+```
 
-## Plan
-1. Driver: add the standard sensor controls (done when this section says so).
-2. Build libcamera from source into `/opt/libcamera-a7z` (does not touch the Debian packages).
-3. Add a small `sunxi-vin` pipeline handler (video node + sensor only, software ISP) and test with `cam`.
-4. Test Picamera2 / GStreamer `libcamerasrc` and document.
-Each step is verified on the board before the next starts; this page is updated with what actually works.
+## Limitations (honest)
+* **Software ISP:** debayering, white balance, colour matrix and gamma run on the CPU. Quality is "good webcam", below the
+  Pi's hardware ISP; no denoise, no lens-shading correction, no sharpening. Tuning: `libcamera/imx519_mipi.yaml`
+  (black level, Raspberry Pi colour matrices at 60 % strength). Auto white balance is grey-world and can be off in
+  strongly coloured rooms.
+* **Auto exposure prefers long exposures:** in a dim room it goes to ~1 s exposures (about 1 fps) unless the application
+  limits `FrameDurationLimits`. `cam` does not limit it.
+* **Controls:** libcamera 0.5.2's simple IPA exposes only `Contrast` and `Saturation`; manual `ExposureTime`/`AnalogueGain`
+  and autofocus (`LensPosition`, `AfMode`) are not available through libcamera yet. Use `a7zcam` / V4L2 for those.
+* Output widths are 4 px narrower than the sensor mode (software ISP border).
+* Only tested with libcamera v0.5.2.
+
+## What had to be changed (for reviewers / porters)
+Kernel (`patches/vin_core_fixes.patch`, `driver/imx519_mipi.c`):
+* sensor: standard `PIXEL_RATE`, `HBLANK` (read-only), `VBLANK` and `ANALOGUE_GAIN` controls with per-mode ranges;
+  `EXPOSURE` now in lines (V4L2 standard; it was lines x 16, the Allwinner ISP convention).
+* VIN `vidioc_querycap` no longer overwrites the V4L2 version with the BSP's own "1.1.0" (libcamera rejects < 5.0).
+* VIN `ENUM_FRAMESIZES` returns one *discrete* size per sensor mode and `-EINVAL` (not `-1`) at the end of the list.
+
+libcamera (`libcamera/0001-libcamera-v0.5.2-sunxi-vin-support.patch`, applies to tag v0.5.2):
+* simple pipeline handler: matches the `sunxi-vin-media` media device with the software ISP; for it, only the sensor and
+  the video node are configured (the VIN programs its own CSI/MIPI/ISP sub-devices), `VIDIOC_S_INPUT` 0 is issued, only the
+  sensor's own Bayer format is offered (the VIN lists every Bayer order and depth), capture buffers are queued *before*
+  `STREAMON` (the VIN dereferences the first queued buffer inside STREAMON and oopses on an empty queue), and frame-start
+  events are not used.
+* the capture-node search requires a real video device (the VIN's `sunxi_mipi` sub-device claims the I/O function).
+* `V4L2VideoDevice`: `setInput()`; duplicate pixel formats (the VIN lists YUYV several times) are skipped instead of
+  discarding the whole list.
+* software ISP buffers come from the system DMA heap (the A733's CMA heap is only 16 MB).
+* `CameraSensorHelper` for `imx519` / `imx519_mipi` (gain = 1024 / (1024 - code)).

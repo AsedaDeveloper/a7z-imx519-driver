@@ -1,0 +1,257 @@
+diff --git a/include/libcamera/internal/v4l2_videodevice.h b/include/libcamera/internal/v4l2_videodevice.h
+index ae6a76c..2c1ba6b 100644
+--- a/include/libcamera/internal/v4l2_videodevice.h
++++ b/include/libcamera/internal/v4l2_videodevice.h
+@@ -196,6 +196,8 @@ public:
+ 	int open(SharedFD handle, enum v4l2_buf_type type);
+ 	void close();
+ 
++	int setInput(unsigned int index);
++
+ 	const char *driverName() const { return caps_.driver(); }
+ 	const char *deviceName() const { return caps_.card(); }
+ 	const char *busName() const { return caps_.bus_info(); }
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index dcd69d9..929f72d 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -609,6 +609,22 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx477", CameraSensorHelperImx477)
+ 
++class CameraSensorHelperImx519 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx519()
++	{
++		/* gain = 1024 / (1024 - code), the same model as the IMX477 */
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx519", CameraSensorHelperImx519)
++/* name of the entity created by the Allwinner (sunxi-vin) sensor driver */
++class CameraSensorHelperImx519Mipi : public CameraSensorHelperImx519
++{
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx519_mipi", CameraSensorHelperImx519Mipi)
++
+ class CameraSensorHelperOv2685 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 4323472..3826521 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -29,6 +29,7 @@
+ #include <libcamera/request.h>
+ #include <libcamera/stream.h>
+ 
++#include "libcamera/internal/bayer_format.h"
+ #include "libcamera/internal/camera.h"
+ #include "libcamera/internal/camera_sensor.h"
+ #include "libcamera/internal/camera_sensor_properties.h"
+@@ -257,6 +258,7 @@ static const SimplePipelineInfo supportedDevices[] = {
+ 	{ "mxc-isi", {}, false },
+ 	{ "qcom-camss", {}, true },
+ 	{ "sun6i-csi", {}, false },
++	{ "sunxi-vin-media", {}, true },
+ };
+ 
+ } /* namespace */
+@@ -409,6 +411,8 @@ public:
+ 	V4L2Subdevice *subdev(const MediaEntity *entity);
+ 	MediaDevice *converter() { return converter_; }
+ 	bool swIspEnabled() const { return swIspEnabled_; }
++	/* Allwinner VIN: its internal sub-devices configure themselves when the video node is set up */
++	bool isSunxi() const { return sunxi_; }
+ 
+ protected:
+ 	int queueRequestDevice(Camera *camera, Request *request) override;
+@@ -440,6 +444,7 @@ private:
+ 
+ 	MediaDevice *converter_;
+ 	bool swIspEnabled_;
++	bool sunxi_ = false;
+ };
+ 
+ /* -----------------------------------------------------------------------------
+@@ -477,7 +482,8 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 		queue.pop();
+ 
+ 		/* Found the capture device. */
+-		if (entity->function() == MEDIA_ENT_F_IO_V4L) {
++		if (entity->function() == MEDIA_ENT_F_IO_V4L &&
++		    entity->type() == MediaEntity::Type::V4L2VideoDevice) {
+ 			LOG(SimplePipeline, Debug)
+ 				<< "Found capture device " << entity->name();
+ 			video = entity;
+@@ -612,6 +618,12 @@ int SimpleCameraData::init()
+ 	video_ = pipe->video(entities_.back().entity);
+ 	ASSERT(video_);
+ 
++	if (pipe->isSunxi()) {
++		ret = video_->setInput(0);
++		if (ret < 0)
++			return ret;
++	}
++
+ 	/*
+ 	 * Setup links first as some subdev drivers take active links into
+ 	 * account to propagate TRY formats. Such is life :-(
+@@ -647,6 +659,9 @@ int SimpleCameraData::init()
+ 	/* Find the first subdev that can generate a frame start signal, if any. */
+ 	frameStartEmitter_ = nullptr;
+ 	for (const Entity &entity : entities_) {
++		/* sunxi-vin: subscribing to frame-start events crashes the BSP kernel (NULL dereference in IRQ context). */
++		if (pipe->isSunxi())
++			break;
+ 		V4L2Subdevice *sd = pipe->subdev(entity.entity);
+ 		if (!sd || !sd->supportsFrameStartEvent())
+ 			continue;
+@@ -691,7 +706,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+ 		return;
+ 	}
+ 
+-	V4L2VideoDevice::Formats videoFormats = video_->formats(format.code);
++	V4L2VideoDevice::Formats videoFormats = video_->formats(pipe()->isSunxi() ? 0 : format.code);
+ 
+ 	LOG(SimplePipeline, Debug)
+ 		<< "Adding configuration for " << format.size
+@@ -707,6 +722,15 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+ 		if (!pixelFormat)
+ 			continue;
+ 
++		/* The VIN only delivers frames in the raw Bayer formats the software ISP understands. */
++		if (pipe()->isSunxi()) {
++			/* The VIN lists every Bayer order and depth; only the sensor format itself carries real data. */
++			if (videoFormat.first != BayerFormat::fromMbusCode(code).toV4L2PixelFormat())
++				continue;
++			if (!swIsp_ || swIsp_->formats(pixelFormat).empty())
++				continue;
++		}
++
+ 		Configuration config;
+ 		config.code = code;
+ 		config.sensorSize = size;
+@@ -737,6 +761,10 @@ int SimpleCameraData::setupLinks()
+ {
+ 	int ret;
+ 
++	/* The Allwinner VIN routes its own pipeline; the media graph links must be left alone. */
++	if (pipe()->isSunxi())
++		return 0;
++
+ 	/*
+ 	 * Configure all links along the pipeline. Some entities may not allow
+ 	 * multiple sink links to be enabled together, even on different sink
+@@ -806,6 +834,10 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	/* Only the sensor and the video node carry formats on the Allwinner VIN. */
++	if (pipe->isSunxi())
++		return 0;
++
+ 	for (const Entity &e : entities_) {
+ 		if (!e.sourceLink)
+ 			break;
+@@ -1476,13 +1508,29 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 						      &DelayedControls::applyControls);
+ 	}
+ 
++	/*
++	 * The Allwinner VIN programs the first queued buffer inside STREAMON, so the internal buffers must be
++	 * queued before the stream is started there.
++	 */
++	bool queuedEarly = false;
++	if (isSunxi() && data->useConversion_ && data->swIsp_) {
++		ret = data->swIsp_->start();
++		if (ret < 0) {
++			stop(camera);
++			return ret;
++		}
++		for (std::unique_ptr<FrameBuffer> &buffer : data->conversionBuffers_)
++			video->queueBuffer(buffer.get());
++		queuedEarly = true;
++	}
++
+ 	ret = video->streamOn();
+ 	if (ret < 0) {
+ 		stop(camera);
+ 		return ret;
+ 	}
+ 
+-	if (data->useConversion_) {
++	if (data->useConversion_ && !queuedEarly) {
+ 		if (data->converter_)
+ 			ret = data->converter_->start();
+ 		else if (data->swIsp_)
+@@ -1679,6 +1727,7 @@ bool SimplePipelineHandler::matchDevice(MediaDevice *media,
+ 	}
+ 
+ 	swIspEnabled_ = info.swIspEnabled;
++	sunxi_ = !strcmp(info.driver, "sunxi-vin-media");
+ 
+ 	/* Locate the sensors. */
+ 	std::vector<MediaEntity *> sensors = locateSensors(media);
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 28e2a36..02c74b5 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -75,8 +75,12 @@ LOG_DEFINE_CATEGORY(SoftwareIsp)
+  */
+ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
+ 			 ControlInfoMap *ipaControls)
+-	: dmaHeap_(DmaBufAllocator::DmaBufAllocatorFlag::CmaHeap |
+-		   DmaBufAllocator::DmaBufAllocatorFlag::SystemHeap |
++	/*
++	 * The software ISP runs on the CPU and does not need physically contiguous memory. Prefer the system heap:
++	 * on boards with a small CMA area (Allwinner A733: 16 MB, "reserved" heap) the CMA heap cannot hold the
++	 * output buffers.
++	 */
++	: dmaHeap_(DmaBufAllocator::DmaBufAllocatorFlag::SystemHeap |
+ 		   DmaBufAllocator::DmaBufAllocatorFlag::UDmaBuf)
+ {
+ 	/*
+diff --git a/src/libcamera/v4l2_videodevice.cpp b/src/libcamera/v4l2_videodevice.cpp
+index d206244..c212074 100644
+--- a/src/libcamera/v4l2_videodevice.cpp
++++ b/src/libcamera/v4l2_videodevice.cpp
+@@ -567,6 +567,22 @@ V4L2VideoDevice::~V4L2VideoDevice()
+  *
+  * \return 0 on success or a negative error code otherwise
+  */
++/**
++ * rief Select the video input (VIDIOC_S_INPUT)
++ * \param[in] index The input index
++ *
++ * Needed by drivers (such as the Allwinner sunxi-vin) that tie the capture pipeline to an input.
++ */
++int V4L2VideoDevice::setInput(unsigned int index)
++{
++	int input = index;
++	int ret = ioctl(VIDIOC_S_INPUT, &input);
++
++	if (ret < 0)
++		LOG(V4L2, Error) << "Failed to select input " << index << ": " << strerror(-ret);
++	return ret;
++}
++
+ int V4L2VideoDevice::open()
+ {
+ 	int ret;
+@@ -1134,10 +1150,10 @@ V4L2VideoDevice::Formats V4L2VideoDevice::formats(uint32_t code)
+ 			return {};
+ 
+ 		if (formats.find(pixelFormat) != formats.end()) {
+-			LOG(V4L2, Error)
+-				<< "Could not add sizes for pixel format "
+-				<< pixelFormat;
+-			return {};
++			/* Some drivers (Allwinner sunxi-vin) list a format twice: keep the first. */
++			LOG(V4L2, Debug)
++				<< "Duplicate pixel format " << pixelFormat << " ignored";
++			continue;
+ 		}
+ 
+ 		formats.emplace(pixelFormat, sizes);
