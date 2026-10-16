@@ -361,6 +361,72 @@ def orient(rgb, rotate=0, hflip=False, vflip=False):
     return np.ascontiguousarray(rgb)
 
 
+# ---------------------------------------------------------------------------------------- calibration: lens shading, dark frames
+CONFIG_DIR = os.path.expanduser("~/.config/a7zcam")
+
+
+def _split(a):
+    """Bayer mosaic (RGGB) -> four planes (R, G1, G2, B), each half size."""
+    return [a[0::2, 0::2], a[0::2, 1::2], a[1::2, 0::2], a[1::2, 1::2]]
+
+
+def lsc_calibrate(frames, grid=(24, 32)):
+    """Lens-shading (vignetting + colour shading) gain maps from raw frames of a uniform, evenly lit, out-of-focus
+    white surface. Returns {'grid': [gh, gw], 'r': [...], 'g': [...], 'b': [...]} (gain >= 1 per grid cell)."""
+    acc = None
+    for f in frames:
+        p = [x.astype(np.float32) - BLACK for x in _split(f)]
+        acc = p if acc is None else [s + x for s, x in zip(acc, p)]
+    planes = [x / len(frames) for x in acc]
+    planes = [planes[0], (planes[1] + planes[2]) * 0.5, planes[3]]
+    out = {"grid": list(grid)}
+    for name, p in zip(("r", "g", "b"), planes):
+        g = cv2.resize(p, (grid[1], grid[0]), interpolation=cv2.INTER_AREA)
+        c = float(np.mean(g[grid[0] // 2 - 1: grid[0] // 2 + 2, grid[1] // 2 - 1: grid[1] // 2 + 2]))
+        gain = np.clip(c / np.maximum(g, 1.0), 1.0, 6.0)
+        gain = cv2.GaussianBlur(gain, (3, 3), 0)
+        out[name] = gain.round(4).tolist()
+    return out
+
+
+def lsc_apply(a, lsc):
+    """Apply gain maps to a raw mosaic (black level preserved). Returns uint16 of the same shape."""
+    h2, w2 = a.shape[0] // 2, a.shape[1] // 2
+    maps = {k: cv2.resize(np.array(lsc[k], np.float32), (w2, h2), interpolation=cv2.INTER_LINEAR) for k in ("r", "g", "b")}
+    out = np.empty(a.shape, np.float32)
+    af = a.astype(np.float32) - BLACK
+    for (i, j), k in (((0, 0), "r"), ((0, 1), "g"), ((1, 0), "g"), ((1, 1), "b")):
+        out[i::2, j::2] = af[i::2, j::2] * maps[k]
+    return np.clip(out + BLACK, 0, FULL).astype(np.uint16)
+
+
+def dark_build(frames, hot_sigma=8.0):
+    """Master dark (mean of dark frames, lens capped) and a hot-pixel mask."""
+    d = np.mean([f.astype(np.float32) for f in frames], axis=0)
+    med = float(np.median(d))
+    mad = float(np.median(np.abs(d - med))) * 1.4826 + 0.3
+    hot = d > med + hot_sigma * mad
+    return d, hot
+
+
+def dark_apply(a, dark, hot):
+    """Subtract the master dark (keeping the black level) and replace hot pixels by their same-colour neighbours."""
+    af = np.clip(a.astype(np.float32) - dark + BLACK, 0, FULL)
+    if hot is not None and hot.any():
+        ys, xs = np.nonzero(hot)
+        H, W = af.shape
+        n = np.zeros(len(ys), np.float32)
+        for dy, dx in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+            n += af[np.clip(ys + dy, 0, H - 1), np.clip(xs + dx, 0, W - 1)]
+        af[ys, xs] = n / 4.0
+    return af.astype(np.uint16)
+
+
+def _calib_path(kind, mode, extra=""):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    return os.path.join(CONFIG_DIR, f"{kind}_{mode}{extra}")
+
+
 # ---------------------------------------------------------------------------------------- commands
 def cmd_still(a):
     size = {"1080p": "1080p", "720p": "720p", "4k": "4k", "2k": "2k", "full": "full"}[a.size]
@@ -378,8 +444,18 @@ def cmd_still(a):
             if not a.exposure:
                 cam.auto_exposure(iters=4)
         raw = cam.wait_frames(2 if cam.exp < 0.3 else 1)
+        if a.dark:
+            z = np.load(a.dark); raw = dark_apply(raw, z["dark"], z["hot"])
         ct, wb = cam.estimate_awb(raw) if a.color == "tuned" else (None, cam.awb_gains(raw))
-        rgb = orient(cam.to_rgb(raw, full_res=True, wb=wb, ct=ct, tuned=(a.color == "tuned"), strength=a.saturation), a.rotate, a.hflip, a.vflip)
+        if a.lsc:
+            lp = a.lsc if a.lsc != "auto" else _calib_path("lsc", size, ".json")
+            if os.path.exists(lp):
+                raw_l = lsc_apply(raw, json.load(open(lp)))
+            else:
+                print(f"no lens-shading calibration at {lp} (run: a7zcam lsc-calibrate --size {size})"); raw_l = raw
+        else:
+            raw_l = raw
+        rgb = orient(cam.to_rgb(raw_l, full_res=True, wb=wb, ct=ct, tuned=(a.color == "tuned"), strength=a.saturation), a.rotate, a.hflip, a.vflip)
         cv2.imwrite(a.output, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
         if a.raw:
             write_dng(a.raw, raw, exp=cam.exp, gain=cam.gain, as_shot=wb.tolist())
@@ -453,6 +529,34 @@ def cmd_video(a):
         print(f"saved {a.output}: {n} frames in {time.time() - t0:.1f}s ({n / (time.time() - t0):.1f} fps), {ow}x{oh}")
 
 
+def cmd_lsc(a):
+    """Calibrate lens shading: point the camera at an evenly lit white wall / paper / screen, defocused, not saturated."""
+    with Camera(a.size) as cam:
+        cam.set_exposure(0.02); cam.set_gain(1.0)
+        cam.auto_exposure(target=0.5, max_exp=0.2)
+        frames = [cam.wait_frames(2) for _ in range(a.n)]
+        m = np.mean([f.mean() for f in frames]) - BLACK
+        print(f"mean level {m:.0f} of 959 (aim for 300-700)")
+        if m < 150 or m > 900:
+            print("warning: the surface is too dark or too bright for a good calibration")
+        lsc = lsc_calibrate(frames)
+        out = a.output or _calib_path("lsc", a.size, ".json")
+        json.dump(dict(lsc, size=a.size, W=cam.W, H=cam.H), open(out, "w"))
+        r = np.array(lsc["r"]); print(f"corner gain: red x{r[0, 0]:.2f}, blue x{np.array(lsc['b'])[0, 0]:.2f}; saved {out}")
+
+
+def cmd_dark(a):
+    """Capture a master dark frame: cap the lens completely first."""
+    with Camera(a.size) as cam:
+        cam.set_exposure(a.exposure); cam.set_gain(a.gain)
+        cam.wait_frames(3 if a.exposure < 1 else 2)
+        frames = [cam.wait_frames(1 if a.exposure >= 1 else 2) for _ in range(a.n)]
+    dark, hot = dark_build(frames)
+    out = a.output or _calib_path("dark", a.size, f"_{a.exposure:g}s_g{a.gain:g}.npz")
+    np.savez_compressed(out, dark=dark, hot=hot, exposure=a.exposure, gain=a.gain, size=a.size)
+    print(f"dark mean {dark.mean() - BLACK:.2f} ADU above black, {int(hot.sum())} hot pixels ({100 * hot.mean():.4f} %); saved {out}")
+
+
 def cmd_focus(a):
     with Camera("1080p") as cam:
         if a.set is not None:
@@ -473,6 +577,8 @@ def main():
     s.add_argument("--focus", type=int); s.add_argument("--af", action="store_true"); s.add_argument("--raw")
     s.add_argument("--color", default="tuned", choices=["tuned", "simple"], help="tuned = Raspberry Pi colour matrix + sRGB curve (default), simple = gray-world only")
     s.add_argument("--saturation", type=float, default=0.6, help="strength of the colour matrix: 1 = the Pi matrix as is, 0 = none (default 0.6)")
+    s.add_argument("--lsc", nargs="?", const="auto", help="apply lens-shading correction (calibration file, default ~/.config/a7zcam)")
+    s.add_argument("--dark", help="subtract a master dark frame made with 'a7zcam dark' (also removes hot pixels)")
     s.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270], help="rotate the picture (clockwise degrees)")
     s.add_argument("--hflip", action="store_true"); s.add_argument("--vflip", action="store_true")
     s.set_defaults(fn=cmd_still)
@@ -482,6 +588,13 @@ def main():
     v.add_argument("--focus", type=int); v.add_argument("--af", action="store_true")
     v.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270]); v.add_argument("--hflip", action="store_true"); v.add_argument("--vflip", action="store_true")
     v.set_defaults(fn=cmd_video)
+    lc = sub.add_parser("lsc-calibrate", help="calibrate lens shading from a uniform white surface")
+    lc.add_argument("--size", default="full", choices=list(MODES)); lc.add_argument("-n", type=int, default=8); lc.add_argument("-o", "--output")
+    lc.set_defaults(fn=cmd_lsc)
+    dk = sub.add_parser("dark", help="capture a master dark frame (lens capped)")
+    dk.add_argument("--size", default="full", choices=list(MODES)); dk.add_argument("--exposure", type=float, required=True)
+    dk.add_argument("--gain", type=float, default=1.0); dk.add_argument("-n", type=int, default=5); dk.add_argument("-o", "--output")
+    dk.set_defaults(fn=cmd_dark)
     f = sub.add_parser("focus"); f.add_argument("--set", type=int); f.add_argument("--af", action="store_true")
     f.set_defaults(fn=cmd_focus)
     l = sub.add_parser("live"); l.add_argument("--port", type=int, default=8080)

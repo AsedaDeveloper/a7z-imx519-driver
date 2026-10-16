@@ -67,3 +67,24 @@ and white balance while recording. The Python loop and the software encoder limi
 constant-rate, so a clip always plays at real speed; frames are repeated when the board falls behind. Use
 `--preset ultrafast` for more speed, `--size 720p` for less load. Full-resolution and 4K modes are far too slow to
 encode live.
+
+## Calibration for better pictures (optional)
+**Dark frames and hot pixels (long exposures).** Cap the lens completely, then make a master dark with the *same
+exposure and gain* you will shoot with, and use it on the stills:
+```bash
+a7zcam dark --size full --exposure 15 --gain 1 -n 5        # saves ~/.config/a7zcam/dark_full_15s_g1.npz
+a7zcam still sky.jpg --size full --exposure 15 --gain 1 --dark ~/.config/a7zcam/dark_full_15s_g1.npz --raw sky.dng
+```
+The dark is subtracted from the raw frame (the black level is kept) and hot pixels are replaced by their same-colour
+neighbours; the DNG is corrected too. Tested on synthetic data (all planted hot pixels found, no false alarms, level
+recovered); a real dark needs a real capped lens, so re-make it when the temperature changes.
+
+**Lens shading (vignetting and colour shading).** Point the camera at an evenly lit white surface (a sheet of paper
+against a window, a white screen), out of focus, not saturated (the tool prints the level; aim for 300-700):
+```bash
+a7zcam lsc-calibrate --size full -n 8                      # saves ~/.config/a7zcam/lsc_full.json
+a7zcam still out.jpg --size full --lsc                     # applies it to the JPEG
+```
+Calibrate per size (`--size`), because the smaller modes use different regions of the sensor. On a synthetic
+vignette the corners went from 26-41 % of the centre brightness to 95-97 %. The corrected image is the JPEG only; the
+DNG stays unmodified for raw converters.
