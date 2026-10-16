@@ -11,7 +11,7 @@
 | `a7zcam`: "no frames from the camera" | the camera is busy, or the modules did not load: `lsmod`, `dmesg | grep -iE "vin|imx519"` |
 | picture very dark in a lit room | exposure still at the default; run `a7zcam still` (auto exposure) or set `exposure` / `gain` |
 | autofocus lands in the wrong place | needs a scene with detail and light; dark/featureless scenes have no contrast to measure |
-| frame times differ ~1 % between boots | the module oscillator drifts; expected |
+| frame times differ between two runs | check that exposure and size were really the same (exposure changes apply 2 frames late); repeated measurements across reboots agree to 0.003 % |
 | `v4l2-ctl --list-ctrls` prints "error 22 getting ctrl ... Visual Angle" | harmless: unsupported ISP-only controls |
 
 ## Collecting information for a bug report

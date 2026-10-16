@@ -40,7 +40,7 @@ has a few traps that cost the author days. This repository documents and fixes a
   white balance, demosaic, auto exposure, autofocus) is done in user space by the tools here. Colour is
   "good", not calibrated; lens shading is correctable but only after you calibrate your module; no noise reduction.
 * **Only the RAW formats stream** (`RG10`, `RG12`); the ISP-processed formats (`NV12`, `RGB3`, …) deliver no frames.
-* The sensor's **oscillator frequency drifts ~1 %** between boots (frame times are not constant to better than that).
+* Frame timing is stable: the same setting gave 282.827-282.836 ms over four reboots (0.003 %), about 0.1 % longer than the nominal line-time calculation.
 * Exposure changes need ~2 frames to reach the output (a sensor property). A fresh stream always wastes its first
   frame (a VIN property): keep the stream open for continuous capture.
 * Flip / mirror are not implemented in the sensor (they would change the Bayer order); the tools flip in software.
