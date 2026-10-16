@@ -7,6 +7,7 @@ a7zcam still out.jpg --size 1080p --af      # autofocus first
 a7zcam still out.jpg --exposure 0.5 --gain 4 --focus 2400 --raw out.dng
 a7zcam still out.jpg --rotate 90 --hflip    # orientation is done in software
 a7zcam still out.jpg --color simple          # plain gray-world white balance; default is `--color tuned --saturation 0.6`
+a7zcam video clip.mp4 --seconds 10 --size 1080p --fps 30 [--preset veryfast --crf 23 --rotate 90 --af]
 a7zcam focus --af                           # autofocus, prints the lens position (0 = infinity .. 4095 = nearest)
 a7zcam focus --set 2000
 a7zcam live --port 8080                     # web live view: exposure, gain, focus, AE, AWB, autofocus, continuous AF
@@ -58,3 +59,11 @@ scene (gray-world ratios projected onto that curve). The Pi matrices are applied
 the full strength looks over-saturated without the rest of the Pi's pipeline. This is a *reasonable* rendering, not
 a calibrated one: there is no lens-shading correction, and the colour was judged by eye, not against a colour chart.
 For accurate colour develop the raw DNG in a raw converter with your own profile.
+
+## Video
+`a7zcam video` tone-maps the raw frames, lets ffmpeg demosaic and encode them with libx264, and runs auto exposure
+and white balance while recording. The Python loop and the software encoder limit it to roughly 17-27 fps at 1080p
+(darker scenes are noisier and slower to encode). Every frame is stamped with its arrival time and the output is
+constant-rate, so a clip always plays at real speed; frames are repeated when the board falls behind. Use
+`--preset ultrafast` for more speed, `--size 720p` for less load. Full-resolution and 4K modes are far too slow to
+encode live.

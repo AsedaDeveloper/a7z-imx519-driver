@@ -26,11 +26,14 @@ has a few traps that cost the author days. This repository documents and fixes a
 | Contrast autofocus (one-shot sweep) and continuous autofocus (user space) | works |
 | JPEG stills + raw **DNG** (opens in Lightroom / RawTherapee / darktable / dcraw); colour matrix from the Pi's IMX519 tuning | works (`a7zcam still`) |
 | Sensor test pattern as the standard `test_pattern` V4L2 control | works |
+| H.264 video recording (software encode, ~17-27 fps at 1080p depending on content) | works, basic (`a7zcam video`) |
 | Web live view with exposure, gain, focus, AE, AWB, autofocus | works (`a7zcam live`) |
 | Long-exposure / astro use (persistent stream, no wasted first frame) | works, see [docs/USAGE.md](docs/USAGE.md) |
 
 ## Known limitations
 
+* **Video is software-encoded** (libx264) from raw frames: 1080p manages roughly 17-27 fps depending on scene and
+  preset, not a steady 30; there is no hardware H.264 path yet. No audio.
 * **No ISP.** The A733's ISP needs Allwinner's closed user-space libraries. Everything an ISP does (black level,
   white balance, demosaic, auto exposure, autofocus) is done in user space by the tools here. Colour is
   "good", not tuned: no lens-shading correction, no noise reduction.

@@ -6,6 +6,7 @@ Pi's ISP would do (black level, white balance, demosaic, gamma, auto exposure, c
 in user space.
 
   a7zcam still photo.jpg [--size 1080p|4k|full] [--af] [--exposure 0.02 --gain 2] [--raw photo.dng]
+  a7zcam video clip.mp4 --seconds 10 [--size 1080p --fps 30 --rotate 90]
   a7zcam focus --af            run autofocus and print the lens position
   a7zcam focus --set 2400      move the lens (0 = infinity .. 4095 = nearest)
   a7zcam live [--port 8080]    web live view with controls
@@ -387,6 +388,71 @@ def cmd_still(a):
               (f"  raw {a.raw}" if a.raw else ""))
 
 
+def cmd_video(a):
+    """Record H.264 video: raw frames -> demosaic + white balance + tone curve (user space) -> ffmpeg/libx264."""
+    W, H = MODES[a.size][0], MODES[a.size][1]
+    if a.size in ("full", "4k") and a.fps > 9:
+        print("note: %s only streams at %s fps; using that" % (a.size, {"full": 9, "4k": 18}[a.size]))
+        a.fps = {"full": 9, "4k": 18}[a.size]
+    with Camera(a.size) as cam:
+        if a.focus is not None:
+            cam.set_focus(a.focus)
+        cam.set_exposure(0.5 / a.fps); cam.set_gain(4)
+        cam.auto_exposure(max_exp=1.0 / a.fps, iters=10)
+        if a.af:
+            print("autofocus:", cam.autofocus()[0])
+        raw = cam.wait_frames(2)
+        ct, wb = cam.estimate_awb(raw)
+        lut_curve = cam.tone_lut(True)
+        def luts(wb):
+            """One 10-bit lookup table per Bayer position (R, G1, G2, B): black level, white balance and tone curve in one step."""
+            v = np.arange(1024, dtype=np.float32)
+            lin = np.clip((v - BLACK) / (FULL - BLACK), 0, 1)
+            return [np.ascontiguousarray((lut_curve[np.clip((lin * g * 4095).astype(np.int32), 0, 4095)] * 255 + 0.5).astype(np.uint8))
+                    for g in (wb[0], wb[1], wb[1], wb[2])]
+        L = luts(wb)
+        oh, ow = (W, H) if a.rotate in (90, 270) else (H, W)
+        vf = {0: [], 90: ["transpose=1"], 180: ["hflip", "vflip"], 270: ["transpose=2"]}[a.rotate]
+        if a.hflip: vf.append("hflip")
+        if a.vflip: vf.append("vflip")
+        # every frame is stamped with its real arrival time, so the clip plays at real speed even when the
+        # board cannot keep up with the requested frame rate (frames are then repeated to keep a constant rate)
+        cmdline = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bayer_rggb8", "-s", f"{W}x{H}",
+                   "-use_wallclock_as_timestamps", "1", "-i", "-"]
+        if vf: cmdline += ["-vf", ",".join(vf)]
+        cmdline += ["-fps_mode", "cfr", "-r", str(a.fps), "-c:v", "libx264", "-preset", a.preset, "-crf", str(a.crf),
+                    "-pix_fmt", "yuv420p", a.output]
+        ff = subprocess.Popen(cmdline, stdin=subprocess.PIPE)            # ffmpeg demosaics and encodes (multi-threaded C)
+        period, t0 = 1.0 / a.fps, time.time()
+        nxt, last, n = t0, None, 0
+        while time.time() - t0 < a.seconds:
+            raw, last = cam.latest(after=last, timeout=10)
+            if raw is None:
+                raise RuntimeError("camera stopped delivering frames")
+            now = time.time()
+            if now < nxt:
+                continue
+            nxt = max(nxt + period, now - period)
+            mos = np.empty(raw.shape, np.uint8)             # tone-map the mosaic (cheap), then demosaic 8-bit
+            mos[0::2, 0::2] = L[0][raw[0::2, 0::2]]; mos[0::2, 1::2] = L[1][raw[0::2, 1::2]]
+            mos[1::2, 0::2] = L[2][raw[1::2, 0::2]]; mos[1::2, 1::2] = L[3][raw[1::2, 1::2]]
+            ff.stdin.write(mos.tobytes()); n += 1
+            if n % 20 == 0:                                  # keep exposure and white balance following the scene
+                ae_raw = raw
+                _, g, _ = cam.planes(ae_raw)
+                med = float(np.percentile(g[::4, ::4], 60)) / (FULL - BLACK)
+                ratio = 4.0 if med <= 0.004 else (0.30 / med) ** 0.6
+                if abs(ratio - 1) > 0.15:
+                    total = min(max(cam.exp * cam.gain * ratio, 1e-4), 32.0 / a.fps)
+                    e = min(total, 0.8 / a.fps); gg = max(total / e, 1.0)
+                    cam.set_exposure(e); cam.set_gain(min(gg, 32.0))
+                ct, wb2 = cam.estimate_awb(ae_raw)
+                wb = 0.9 * wb + 0.1 * wb2; L = luts(wb)
+        ff.stdin.close(); ff.wait()
+        print(f"sensor delivered {cam.fps:.1f} fps, exposure {cam.exp:.4f}s gain {cam.gain:.1f}x")
+        print(f"saved {a.output}: {n} frames in {time.time() - t0:.1f}s ({n / (time.time() - t0):.1f} fps), {ow}x{oh}")
+
+
 def cmd_focus(a):
     with Camera("1080p") as cam:
         if a.set is not None:
@@ -410,6 +476,12 @@ def main():
     s.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270], help="rotate the picture (clockwise degrees)")
     s.add_argument("--hflip", action="store_true"); s.add_argument("--vflip", action="store_true")
     s.set_defaults(fn=cmd_still)
+    v = sub.add_parser("video", help="record H.264 video (ffmpeg/libx264)"); v.add_argument("output")
+    v.add_argument("--size", default="1080p", choices=list(MODES)); v.add_argument("--seconds", type=float, default=10)
+    v.add_argument("--fps", type=int, default=30); v.add_argument("--crf", type=int, default=23); v.add_argument("--preset", default="veryfast")
+    v.add_argument("--focus", type=int); v.add_argument("--af", action="store_true")
+    v.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270]); v.add_argument("--hflip", action="store_true"); v.add_argument("--vflip", action="store_true")
+    v.set_defaults(fn=cmd_video)
     f = sub.add_parser("focus"); f.add_argument("--set", type=int); f.add_argument("--af", action="store_true")
     f.set_defaults(fn=cmd_focus)
     l = sub.add_parser("live"); l.add_argument("--port", type=int, default=8080)
