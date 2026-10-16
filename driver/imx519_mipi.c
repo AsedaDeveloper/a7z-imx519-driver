@@ -82,6 +82,9 @@ MODULE_PARM_DESC(term_res, "enable the 100ohm MIPI termination (1) or not (0)");
 #define I2C_ADDR 0x34		/* 7-bit 0x1a, the BSP takes the 8-bit form */
 #define SENSOR_NAME "imx519_mipi"
 static int imx519_mipi_sensor_vts;
+static int imx519_in_update;		/* set while the driver itself moves the blanking controls (no register writes then) */
+static int imx519_user_vblank;		/* VBLANK set through the standard control for the current mode (0 = mode default) */
+static struct v4l2_ctrl *imx519_vblank_ctrl, *imx519_hblank_ctrl, *imx519_pixel_rate_ctrl, *imx519_again_ctrl;
 static int imx519_test_pattern;		/* last value of the test_pattern control (re-applied every stream start) */
 
 struct cfg_array {		/* coming later */
@@ -1324,7 +1327,9 @@ static int sensor_reg_init(struct sensor_info *info)
 		wsize->set_size(sd);
 
 	/* the frame length of THIS mode must be known before any exposure is written */
-	imx519_mipi_sensor_vts = wsize->vts;
+	imx519_mipi_sensor_vts = imx519_user_vblank ? imx519_user_vblank + wsize->height : wsize->vts;
+	sensor_write(sd, 0x0340, (imx519_mipi_sensor_vts >> 8) & 0xff);	/* frame length, also without an exposure value */
+	sensor_write(sd, 0x0341, imx519_mipi_sensor_vts & 0xff);
 
 	/* module parameters: defaults for programs that do not use the V4L2 controls */
 	if (exp_us > 0 || gain_x16 > 0) {
@@ -1399,6 +1404,46 @@ static int sensor_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
 	return 0;
 }
 
+/*
+ * Standard sensor controls used by libcamera (PIXEL_RATE, HBLANK, VBLANK, ANALOGUE_GAIN) next to the Allwinner ones
+ * (exposure in lines x 16, gain x 16). Their ranges follow the current mode.
+ */
+static void imx519_update_blank_ctrls(struct sensor_info *info)
+{
+	struct sensor_win_size *w = info->current_wins;
+	s64 hblank, vblank_min, vblank_max;
+
+	if (!w || !imx519_vblank_ctrl)
+		return;
+	hblank = w->hts - w->width;
+	vblank_min = w->vts - w->height;
+	vblank_max = IMX519_FRAME_LENGTH_MAX - w->height;
+	imx519_in_update = 1;
+	__v4l2_ctrl_modify_range(imx519_pixel_rate_ctrl, w->pclk, w->pclk, 1, w->pclk);
+	__v4l2_ctrl_s_ctrl_int64(imx519_pixel_rate_ctrl, w->pclk);
+	__v4l2_ctrl_modify_range(imx519_hblank_ctrl, hblank, hblank, 1, hblank);
+	__v4l2_ctrl_s_ctrl(imx519_hblank_ctrl, hblank);
+	__v4l2_ctrl_modify_range(imx519_vblank_ctrl, vblank_min, vblank_max, 1, vblank_min);
+	__v4l2_ctrl_s_ctrl(imx519_vblank_ctrl, vblank_min);
+	imx519_in_update = 0;
+}
+
+static int imx519_set_fmt(struct v4l2_subdev *sd, struct v4l2_subdev_state *state, struct v4l2_subdev_format *fmt)
+{
+	struct sensor_info *info = to_state(sd);
+	struct sensor_win_size *before = info->current_wins;
+	int ret = sensor_set_fmt(sd, state, fmt);
+
+	if (!ret && fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
+		if (info->current_wins != before)
+			imx519_user_vblank = 0;			/* a new mode starts with its own frame length */
+		v4l2_ctrl_lock(imx519_vblank_ctrl);
+		imx519_update_blank_ctrls(info);
+		v4l2_ctrl_unlock(imx519_vblank_ctrl);
+	}
+	return ret;
+}
+
 static int sensor_g_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct sensor_info *info =
@@ -1425,6 +1470,36 @@ static int sensor_s_ctrl(struct v4l2_ctrl *ctrl)
 		return sensor_s_gain(sd, ctrl->val);
 	case V4L2_CID_EXPOSURE:
 		return sensor_s_exp(sd, ctrl->val);
+	case V4L2_CID_PIXEL_RATE:
+	case V4L2_CID_HBLANK:
+		return 0;				/* read-only: fixed by the mode */
+	case V4L2_CID_VBLANK: {
+		unsigned int frame = ctrl->val + info->current_wins->height;
+
+		if (imx519_in_update)
+			return 0;
+
+		imx519_user_vblank = ctrl->val == (info->current_wins->vts - info->current_wins->height) ? 0 : ctrl->val;
+		imx519_mipi_sensor_vts = frame;
+		sensor_write(sd, 0x0104, 0x01);
+		if (info->exp > 0) {
+			imx519_write_exposure(sd, info->exp);	/* re-applies the frame length (and the long-exposure shift) */
+		} else {
+			sensor_write(sd, 0x0340, (frame >> 8) & 0xff);
+			sensor_write(sd, 0x0341, frame & 0xff);
+		}
+		sensor_write(sd, 0x0104, 0x00);
+		return 0;
+	}
+	case V4L2_CID_ANALOGUE_GAIN:
+		sensor_write(sd, 0x0104, 0x01);
+		sensor_write(sd, 0x0204, (ctrl->val >> 8) & 0xff);
+		sensor_write(sd, 0x0205, ctrl->val & 0xff);
+		sensor_write(sd, 0x020e, 0x01);		/* digital gain 1.0 */
+		sensor_write(sd, 0x020f, 0x00);
+		sensor_write(sd, 0x0104, 0x00);
+		info->gain = (16 * 1024) / (1024 - ctrl->val);
+		return 0;
 	case V4L2_CID_TEST_PATTERN:
 		imx519_test_pattern = ctrl->val;
 		sensor_write(sd, 0x0600, 0x00);
@@ -1460,7 +1535,7 @@ static const struct v4l2_subdev_pad_ops sensor_pad_ops = {
 	.enum_frame_size = sensor_enum_frame_size,
 	.enum_frame_interval = sensor_enum_frame_interval,
 	.get_fmt = sensor_get_fmt,
-	.set_fmt = sensor_set_fmt,
+	.set_fmt = imx519_set_fmt,
 	.get_mbus_config = sensor_g_mbus_config,
 };
 
@@ -1502,13 +1577,26 @@ static int sensor_init_controls(struct v4l2_subdev *sd, const struct v4l2_ctrl_o
 	int i;
 	int ret = 0;
 
-	v4l2_ctrl_handler_init(handler, 3 + ARRAY_SIZE(sensor_custom_ctrls));
+	v4l2_ctrl_handler_init(handler, 7 + ARRAY_SIZE(sensor_custom_ctrls));
 
 	ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_EXPOSURE, 0,
 			      0x7ffffff, 1, 0);		/* about 8 million lines: long exposures */
 	(void)ctrl;	/* not volatile: the value last set is the value reported */
 	v4l2_ctrl_new_std(handler, ops, V4L2_CID_GAIN, 16,
 			      IMX519_GAIN_MAX_X16, 1, 16);		/* gain x16: 16 = 1x ... 1024 = 64x */
+	{
+		struct sensor_win_size *w = &sensor_win_sizes[0];
+
+		imx519_pixel_rate_ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_PIXEL_RATE, w->pclk, w->pclk, 1, w->pclk);
+		imx519_hblank_ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_HBLANK, w->hts - w->width, w->hts - w->width, 1, w->hts - w->width);
+		imx519_vblank_ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_VBLANK, w->vts - w->height,
+						       IMX519_FRAME_LENGTH_MAX - w->height, 1, w->vts - w->height);
+		imx519_again_ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_ANALOGUE_GAIN, 0, 960, 1, 0);	/* register code: gain = 1024 / (1024 - code) */
+		if (imx519_pixel_rate_ctrl)
+			imx519_pixel_rate_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+		if (imx519_hblank_ctrl)
+			imx519_hblank_ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	}
 	v4l2_ctrl_new_std_menu_items(handler, ops, V4L2_CID_TEST_PATTERN,
 				     ARRAY_SIZE(imx519_test_pattern_menu) - 1, 0, 0,
 				     imx519_test_pattern_menu);
