@@ -1,0 +1,7 @@
+# Hardware video encoder (Allwinner Cedar VE) usable by the "video" group.
+# The stock Radxa rules only give access to users logged in on a local seat (not ssh sessions or services).
+SUBSYSTEM=="cedar_ve",  GROUP="video", MODE="0660"
+SUBSYSTEM=="cedar_ve2", GROUP="video", MODE="0660"
+KERNEL=="cedar_dev*",   GROUP="video", MODE="0660"
+KERNEL=="sunxi_soc_info", GROUP="video", MODE="0660"
+SUBSYSTEM=="dma_heap", KERNEL=="system", GROUP="video", MODE="0660"

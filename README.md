@@ -27,14 +27,13 @@ has a few traps that cost the author days. This repository documents and fixes a
 | JPEG stills + raw **DNG** (opens in Lightroom / RawTherapee / darktable / dcraw); colour matrix from the Pi's IMX519 tuning | works (`a7zcam still`) |
 | Sensor test pattern as the standard `test_pattern` V4L2 control | works |
 | Lens-shading calibration + dark-frame / hot-pixel correction (`a7zcam lsc-calibrate`, `a7zcam dark`) | works on synthetic data and a smoke test; needs your own calibration shots |
-| H.264 video recording (software encode, ~17-27 fps at 1080p depending on content) | works, basic (`a7zcam video`) |
+| H.264 video recording with the **hardware encoder** (Allwinner Cedar VE): 1080p at 30 fps, 720p 30 fps, 4K ~17 fps | works (`a7zcam video`; needs GStreamer + the Allwinner OMX plugin, otherwise falls back to software x264 at ~17 fps) |
 | Web live view with exposure, gain, focus, AE, AWB, autofocus | works (`a7zcam live`) |
 | Long-exposure / astro use (persistent stream, no wasted first frame) | works, see [docs/USAGE.md](docs/USAGE.md) |
 
 ## Known limitations
 
-* **Video is software-encoded** (libx264) from raw frames: 1080p manages roughly 17-27 fps depending on scene and
-  preset, not a steady 30; there is no hardware H.264 path yet. No audio.
+* **Video:** H.264 uses the hardware encoder when GStreamer and the Allwinner OMX plugin are installed (see docs/USAGE.md), otherwise libx264 in software (~17 fps at 1080p). The demosaic and tone curve still run on the CPU (~3 cores at 1080p30). No audio, no raw video, only H.264 in MP4.
 * **No ISP.** The A733's ISP needs Allwinner's closed user-space libraries. Everything an ISP does (black level,
   white balance, demosaic, auto exposure, autofocus) is done in user space by the tools here. Colour is
   "good", not calibrated; lens shading is correctable but only after you calibrate your module; no noise reduction.

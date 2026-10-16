@@ -161,6 +161,7 @@ else say "5/7 overlay skipped (--no-overlay)"; fi
 # ------------------------------------------------------------------------------------------------ 6. udev + autoload
 say "6/7 udev rule and module autoload"
 run install -m 644 "$REPO/scripts/62-imx519-params.rules" /etc/udev/rules.d/62-imx519-params.rules
+run install -m 644 "$REPO/scripts/63-cedar-ve.rules" /etc/udev/rules.d/63-cedar-ve.rules   # hardware H.264 encoder for the video group
 # the lens driver must be loaded BEFORE the VIN core so that the framework finds it
 run sh -c "echo ak7375_act > /etc/modules-load.d/ak7375_act.conf"
 run depmod -a
@@ -174,6 +175,9 @@ if [ "$DO_TOOLS" = 1 ]; then
   run install -m 644 "$REPO/tools/liveview.py" /opt/a7zcam/liveview.py
   run install -m 644 "$REPO/tools/imx519_color.json" /opt/a7zcam/imx519_color.json
   run ln -sf /opt/a7zcam/a7zcam.py /usr/local/bin/a7zcam
+  if ! command -v gst-inspect-1.0 >/dev/null || ! gst-inspect-1.0 omxh264videoenc >/dev/null 2>&1; then
+    warn "hardware H.264 encoding needs GStreamer + the Allwinner OMX plugin: apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-omx-allwinner (video falls back to software x264 without it)"
+  fi
   if ! python3 -c "import numpy, cv2" 2>/dev/null; then
     warn "python3 numpy/opencv missing: apt install python3-numpy python3-opencv"
   fi

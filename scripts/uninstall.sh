@@ -10,7 +10,7 @@ echo "removing kernel modules (the original Radxa VIN modules under kernel/ were
 rm -f "/lib/modules/${KVER}/extra/imx519_mipi.ko" "/lib/modules/${KVER}/extra/ak7375_act.ko" \
       "/lib/modules/${KVER}/updates/vin_io.ko" "/lib/modules/${KVER}/updates/vin_v4l2.ko"
 rmdir --ignore-fail-on-non-empty "/lib/modules/${KVER}/updates" 2>/dev/null || true
-rm -f /etc/modules-load.d/ak7375_act.conf /etc/udev/rules.d/62-imx519-params.rules
+rm -f /etc/modules-load.d/ak7375_act.conf /etc/udev/rules.d/62-imx519-params.rules /etc/udev/rules.d/63-cedar-ve.rules
 echo "removing the device-tree overlay"
 rm -f /boot/dtbo/cubie-a7z-imx519-j5.dtbo
 command -v u-boot-update >/dev/null && u-boot-update >/dev/null 2>&1 || true

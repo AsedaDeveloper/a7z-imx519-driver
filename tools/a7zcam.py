@@ -464,6 +464,35 @@ def cmd_still(a):
               (f"  raw {a.raw}" if a.raw else ""))
 
 
+def mosaic_to_nv12(mos, rotate=0, hflip=False, vflip=False):
+    """8-bit tone-mapped RGGB mosaic -> NV12 bytes (OpenCV demosaic, ~6 ms for 1080p on the A7Z, versus ~5 cores for
+    ffmpeg's swscale). Note: OpenCV's 'BayerBG' code is the one that matches an RGGB sensor layout."""
+    bgr = cv2.cvtColor(mos, cv2.COLOR_BayerBG2BGR)
+    if rotate:
+        bgr = cv2.rotate(bgr, {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}[rotate])
+    if hflip or vflip:
+        bgr = cv2.flip(bgr, 0 if (vflip and not hflip) else (1 if (hflip and not vflip) else -1))
+    h, w = bgr.shape[:2]
+    i420 = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV_I420)
+    u = i420[h:h + h // 4].reshape(h // 2, w // 2)
+    v = i420[h + h // 4:].reshape(h // 2, w // 2)
+    uv = np.empty((h // 2, w), np.uint8)
+    uv[:, 0::2] = u
+    uv[:, 1::2] = v
+    return i420[:h].tobytes() + uv.tobytes()
+
+
+def hw_encoder_available():
+    """True if the Allwinner hardware H.264 encoder (GStreamer OMX element on top of Cedar VE) can be used."""
+    if not os.path.exists("/dev/cedar_dev") or not os.access("/dev/cedar_dev", os.R_OK | os.W_OK):
+        return False
+    try:
+        return subprocess.run(["gst-inspect-1.0", "omxh264videoenc"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def cmd_video(a):
     """Record H.264 video: raw frames -> demosaic + white balance + tone curve (user space) -> ffmpeg/libx264."""
     W, H = MODES[a.size][0], MODES[a.size][1]
@@ -496,24 +525,54 @@ def cmd_video(a):
         cmdline = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bayer_rggb8", "-s", f"{W}x{H}",
                    "-use_wallclock_as_timestamps", "1", "-i", "-"]
         if vf: cmdline += ["-vf", ",".join(vf)]
-        cmdline += ["-fps_mode", "cfr", "-r", str(a.fps), "-c:v", "libx264", "-preset", a.preset, "-crf", str(a.crf),
-                    "-pix_fmt", "yuv420p", a.output]
-        ff = subprocess.Popen(cmdline, stdin=subprocess.PIPE)            # ffmpeg demosaics and encodes (multi-threaded C)
+        use_hw = a.encoder == "hw" or (a.encoder == "auto" and hw_encoder_available())
+        gst = None
+        if use_hw:
+            # OpenCV demosaics to NV12 and the Allwinner hardware encoder (Cedar VE, via GStreamer OMX) does the H.264
+            bitrate = a.bitrate or int(max(1.5e6, min(25e6, ow * oh * a.fps * 0.09)))
+            gstline = ["gst-launch-1.0", "-q", "-e", "fdsrc", "fd=0", "!",
+                       f"rawvideoparse format=nv12 width={ow} height={oh} framerate={a.fps}/1", "!",
+                       f"omxh264videoenc control-rate=variable target-bitrate={bitrate} interval-intraframes={a.fps * 2}", "!",
+                       "h264parse", "!", "mp4mux", "!", f"filesink location={a.output}"]
+            gst = subprocess.Popen(" ".join(gstline), shell=True, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            ff = gst
+        else:
+            cmdline += ["-fps_mode", "cfr", "-r", str(a.fps), "-c:v", "libx264", "-preset", a.preset, "-crf", str(a.crf),
+                        "-pix_fmt", "yuv420p", a.output]
+            ff = subprocess.Popen(cmdline, stdin=subprocess.PIPE)        # ffmpeg demosaics and encodes (multi-threaded C)
         period, t0 = 1.0 / a.fps, time.time()
-        nxt, last, n = t0, None, 0
+        nxt, last, n, ae_n = t0, None, 0, -1
+        cur = None
         while time.time() - t0 < a.seconds:
-            raw, last = cam.latest(after=last, timeout=10)
-            if raw is None:
-                raise RuntimeError("camera stopped delivering frames")
-            now = time.time()
-            if now < nxt:
-                continue
-            nxt = max(nxt + period, now - period)
-            mos = np.empty(raw.shape, np.uint8)             # tone-map the mosaic (cheap), then demosaic 8-bit
-            mos[0::2, 0::2] = L[0][raw[0::2, 0::2]]; mos[0::2, 1::2] = L[1][raw[0::2, 1::2]]
-            mos[1::2, 0::2] = L[2][raw[1::2, 0::2]]; mos[1::2, 1::2] = L[3][raw[1::2, 1::2]]
-            ff.stdin.write(mos.tobytes()); n += 1
-            if n % 20 == 0:                                  # keep exposure and white balance following the scene
+            if use_hw:
+                raw, seq = cam.latest(after=last, timeout=0.002)
+                now = time.time()
+                if raw is not None:
+                    last = seq
+                    mos = np.empty(raw.shape, np.uint8)
+                    mos[0::2, 0::2] = L[0][raw[0::2, 0::2]]; mos[0::2, 1::2] = L[1][raw[0::2, 1::2]]
+                    mos[1::2, 0::2] = L[2][raw[1::2, 0::2]]; mos[1::2, 1::2] = L[3][raw[1::2, 1::2]]
+                    cur = mosaic_to_nv12(mos, a.rotate, a.hflip, a.vflip)
+                if cur is None:
+                    time.sleep(0.002); continue
+                while nxt <= now:                      # constant frame rate on the wall clock: repeat the last frame when late,
+                    gst.stdin.write(cur); n += 1; nxt += period     # so the clip always lasts as long as the recording did
+                if raw is None:
+                    time.sleep(0.002); continue
+            else:
+                raw, last = cam.latest(after=last, timeout=10)
+                if raw is None:
+                    raise RuntimeError("camera stopped delivering frames")
+                now = time.time()
+                if now < nxt:
+                    continue
+                nxt = max(nxt + period, now - period)
+                mos = np.empty(raw.shape, np.uint8)             # tone-map the mosaic (cheap), then demosaic 8-bit
+                mos[0::2, 0::2] = L[0][raw[0::2, 0::2]]; mos[0::2, 1::2] = L[1][raw[0::2, 1::2]]
+                mos[1::2, 0::2] = L[2][raw[1::2, 0::2]]; mos[1::2, 1::2] = L[3][raw[1::2, 1::2]]
+                ff.stdin.write(mos.tobytes()); n += 1
+            if n % 20 == 0 and n != ae_n:                    # keep exposure and white balance following the scene
+                ae_n = n
                 ae_raw = raw
                 _, g, _ = cam.planes(ae_raw)
                 med = float(np.percentile(g[::4, ::4], 60)) / (FULL - BLACK)
@@ -525,6 +584,9 @@ def cmd_video(a):
                 ct, wb2 = cam.estimate_awb(ae_raw)
                 wb = 0.9 * wb + 0.1 * wb2; L = luts(wb)
         ff.stdin.close(); ff.wait()
+        if gst is not None:
+            gst.wait()
+        print(f"encoder: {'hardware (Cedar VE, omxh264videoenc)' if use_hw else 'software (libx264)'}")
         print(f"sensor delivered {cam.fps:.1f} fps, exposure {cam.exp:.4f}s gain {cam.gain:.1f}x")
         print(f"saved {a.output}: {n} frames in {time.time() - t0:.1f}s ({n / (time.time() - t0):.1f} fps), {ow}x{oh}")
 
@@ -582,9 +644,11 @@ def main():
     s.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270], help="rotate the picture (clockwise degrees)")
     s.add_argument("--hflip", action="store_true"); s.add_argument("--vflip", action="store_true")
     s.set_defaults(fn=cmd_still)
-    v = sub.add_parser("video", help="record H.264 video (ffmpeg/libx264)"); v.add_argument("output")
+    v = sub.add_parser("video", help="record H.264 video (hardware encoder if available, else libx264)"); v.add_argument("output")
     v.add_argument("--size", default="1080p", choices=list(MODES)); v.add_argument("--seconds", type=float, default=10)
     v.add_argument("--fps", type=int, default=30); v.add_argument("--crf", type=int, default=23); v.add_argument("--preset", default="veryfast")
+    v.add_argument("--encoder", default="auto", choices=["auto", "hw", "sw"], help="hw = Allwinner hardware encoder (GStreamer omx), sw = libx264, auto = hw when available")
+    v.add_argument("--bitrate", type=int, default=0, help="hardware encoder bitrate in bit/s (default: from size and fps)")
     v.add_argument("--focus", type=int); v.add_argument("--af", action="store_true")
     v.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270]); v.add_argument("--hflip", action="store_true"); v.add_argument("--vflip", action="store_true")
     v.set_defaults(fn=cmd_video)

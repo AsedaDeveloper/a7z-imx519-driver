@@ -115,5 +115,37 @@ class BayerTests(unittest.TestCase):
         self.assertTrue((r == 1).all() and (g1 == 2).all() and (g2 == 3).all() and (b == 4).all())
 
 
+class Nv12Tests(unittest.TestCase):
+    def _planes(self, nv12, w, h):
+        y = np.frombuffer(nv12, np.uint8, w * h).reshape(h, w)
+        uv = np.frombuffer(nv12, np.uint8, offset=w * h).reshape(h // 2, w // 2, 2)
+        return y, uv[..., 0], uv[..., 1]
+
+    def _mosaic(self, site):
+        m = np.zeros((64, 96), np.uint8)
+        m[site[0]::2, site[1]::2] = 200
+        return m
+
+    def test_size(self):
+        self.assertEqual(len(z.mosaic_to_nv12(self._mosaic((0, 0)))), 96 * 64 * 3 // 2)
+        self.assertEqual(len(z.mosaic_to_nv12(self._mosaic((0, 0)), rotate=90)), 96 * 64 * 3 // 2)
+
+    def test_red_site_gives_red(self):
+        """Signal only on the R sites of an RGGB mosaic must come out red (V high, U low), not blue."""
+        y, u, v = self._planes(z.mosaic_to_nv12(self._mosaic((0, 0))), 96, 64)
+        self.assertGreater(float(v[8:24, 12:36].mean()), 160)
+        self.assertLess(float(u[8:24, 12:36].mean()), 110)
+
+    def test_blue_site_gives_blue(self):
+        y, u, v = self._planes(z.mosaic_to_nv12(self._mosaic((1, 1))), 96, 64)
+        self.assertGreater(float(u[8:24, 12:36].mean()), 160)
+        self.assertLess(float(v[8:24, 12:36].mean()), 120)
+
+    def test_rotation_swaps_dimensions(self):
+        m = self._mosaic((0, 0))
+        y, _, _ = self._planes(z.mosaic_to_nv12(m, rotate=90), 64, 96)
+        self.assertEqual(y.shape, (96, 64))
+
+
 if __name__ == "__main__":
     unittest.main()

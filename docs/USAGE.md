@@ -7,7 +7,7 @@ a7zcam still out.jpg --size 1080p --af      # autofocus first
 a7zcam still out.jpg --exposure 0.5 --gain 4 --focus 2400 --raw out.dng
 a7zcam still out.jpg --rotate 90 --hflip    # orientation is done in software
 a7zcam still out.jpg --color simple          # plain gray-world white balance; default is `--color tuned --saturation 0.6`
-a7zcam video clip.mp4 --seconds 10 --size 1080p --fps 30 [--preset veryfast --crf 23 --rotate 90 --af]
+a7zcam video clip.mp4 --seconds 10 --size 1080p --fps 30 [--encoder hw|sw --bitrate N --rotate 90 --af]
 a7zcam focus --af                           # autofocus, prints the lens position (0 = infinity .. 4095 = nearest)
 a7zcam focus --set 2000
 a7zcam live --port 8080                     # web live view: exposure, gain, focus, AE, AWB, autofocus, continuous AF
@@ -61,12 +61,25 @@ a calibrated one: there is no lens-shading correction, and the colour was judged
 For accurate colour develop the raw DNG in a raw converter with your own profile.
 
 ## Video
-`a7zcam video` tone-maps the raw frames, lets ffmpeg demosaic and encode them with libx264, and runs auto exposure
-and white balance while recording. The Python loop and the software encoder limit it to roughly 17-27 fps at 1080p
-(darker scenes are noisier and slower to encode). Every frame is stamped with its arrival time and the output is
-constant-rate, so a clip always plays at real speed; frames are repeated when the board falls behind. Use
-`--preset ultrafast` for more speed, `--size 720p` for less load. Full-resolution and 4K modes are far too slow to
-encode live.
+`a7zcam video clip.mp4 --seconds 10 --size 1080p --fps 30` tone-maps the raw frames, demosaics them with OpenCV and
+encodes H.264 with the **Allwinner hardware encoder** (Cedar VE through GStreamer's `omxh264videoenc`). Auto exposure
+and white balance run while recording. Options: `--encoder auto|hw|sw` (auto = hardware when available),
+`--bitrate BITS_PER_S` (hardware), `--crf/--preset` (software x264), `--rotate`, `--hflip`, `--vflip`, `--af`.
+
+Measured on the A7Z (indoor scene, gain up to 32x): 1080p **29.6-29.9 fps** at about 290-340 % CPU of 800 %;
+720p 29.8 fps; 4K 17.3 fps (the sensor's limit at that size is 18 fps). Software x264 manages 16-17 fps at 1080p at
+about 590 % CPU, which is why the hardware path is the default. Every clip lasts as long as the recording did: if the
+board cannot keep up, the last frame is repeated instead of the clip speeding up.
+
+One-time setup for the hardware encoder (the installer prints this if it is missing):
+```bash
+sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+                 gstreamer1.0-plugins-bad gstreamer1.0-omx-allwinner
+```
+`install.sh` also installs `scripts/63-cedar-ve.rules`, which gives the `video` group access to `/dev/cedar_dev*`,
+`/dev/sunxi_soc_info` and the DMA heap (Radxa's stock rule only covers users logged in on a local seat, so the encoder
+crashes with SIGSEGV when started from ssh or a service as a normal user without it). Log out and in once so your
+user is in the `video` group.
 
 ## Calibration for better pictures (optional)
 **Dark frames and hot pixels (long exposures).** Cap the lens completely, then make a master dark with the *same
