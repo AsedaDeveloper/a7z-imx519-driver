@@ -1,0 +1,71 @@
+--- a/drivers/vin/vin-video/vin_video.c
++++ b/drivers/vin/vin-video/vin_video.c
+@@ -2468,6 +2468,24 @@
+ 	v4l2_ctrl_handler_setup(cap->pipe.sd[VIN_IND_SENSOR]->ctrl_handler);
+ 	 */
+ 
++	/*
++	 * imx519-a7z patch: apply the controls userspace changed BEFORE selecting the input (v4l2-ctl does this),
++	 * but only those, so untouched controls do not overwrite the sensor tables with their defaults.
++	 */
++	{
++		static const u32 ids[] = { V4L2_CID_EXPOSURE, V4L2_CID_GAIN, V4L2_CID_FOCUS_ABSOLUTE };
++		int k;
++
++		for (k = 0; k < ARRAY_SIZE(ids); k++) {
++			struct v4l2_ctrl *c = v4l2_ctrl_find(&vinc->vid_cap.ctrl_handler, ids[k]);
++
++			if (c && c->ops && c->ops->s_ctrl && c->cur.val != c->default_value) {
++				c->val = c->cur.val;
++				c->ops->s_ctrl(c);
++			}
++		}
++	}
++
+ 	vinc->hflip = inst->hflip;
+ 	vinc->vflip = inst->vflip;
+ 
+@@ -3884,11 +3902,18 @@
+ 	struct sensor_instance *inst = get_valid_sensor(cap->vinc);
+ 	struct v4l2_subdev *sensor = cap->pipe.sd[VIN_IND_SENSOR];
+ 	struct v4l2_subdev *flash = cap->pipe.sd[VIN_IND_FLASH];
++	struct v4l2_subdev *isp_sd = cap->pipe.sd[VIN_IND_ISP];
+ 	struct v4l2_control c;
+ 	int ret = 0;
+ 
++	/* imx519-a7z patch: no sensor in the pipeline yet (input not selected): report the default, do not dereference NULL */
++	if (!inst || !sensor) {
++		ctrl->val = ctrl->default_value;
++		return 0;
++	}
++
+ 	c.id = ctrl->id;
+-	if (inst->is_isp_used && inst->is_bayer_raw) {
++	if (inst->is_isp_used && inst->is_bayer_raw && isp_sd) {
+ 		switch (ctrl->id) {
+ 		case V4L2_CID_EXPOSURE:
+ 			v4l2_g_ctrl(sensor->ctrl_handler, &c);
+@@ -4146,6 +4171,13 @@
+ 	int ret = 0;
+ 
+ 	/*
++	 * imx519-a7z patch: no sensor in the pipeline yet (input not selected). Accept the value so the control
++	 * framework stores it; it is applied to the sensor when streaming starts (v4l2_ctrl_handler_setup).
++	 */
++	if (!inst || !sensor)
++		return 0;
++
++	/*
+ 	 * make sure g_ctrl will get the value that hardware is using
+ 	 * so that ctrl->flags should be V4L2_CTRL_FLAG_VOLATILE, after s_ctrl
+ 	  */
+@@ -4237,7 +4269,8 @@
+ 		break;
+ 	}
+ 
+-	if (inst->is_isp_used && inst->is_bayer_raw) {
++	/* imx519-a7z patch: without an ISP subdevice send exposure/gain/etc. to the sensor like a YUV sensor */
++	if (inst->is_isp_used && inst->is_bayer_raw && isp) {
+ 		switch (ctrl->id) {
+ 		case V4L2_CID_BRIGHTNESS:
+ 		case V4L2_CID_CONTRAST:

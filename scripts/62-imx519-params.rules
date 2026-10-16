@@ -1,0 +1,2 @@
+# let the capture user set exposure/gain through the driver parameters
+SUBSYSTEM=="video4linux", KERNEL=="video0", ACTION=="add", RUN+="/bin/sh -c 'chmod 666 /sys/module/imx519_mipi/parameters/exp_us /sys/module/imx519_mipi/parameters/gain_x16'"

@@ -1,0 +1,15 @@
+[Unit]
+Description=IMX519 live view (a7zcam)
+After=network-online.target systemd-modules-load.service
+
+[Service]
+User=radxa
+Group=video
+Environment=LIVEVIEW_PORT=8080
+# Environment=LIVEVIEW_ROTATE=90
+ExecStart=/usr/bin/python3 /opt/a7zcam/liveview.py
+Restart=on-failure
+RestartSec=5
+# the camera device is exclusive: stop this service before using a7zcam still or any other program
+[Install]
+WantedBy=multi-user.target
