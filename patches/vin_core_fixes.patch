@@ -1,5 +1,31 @@
---- a/drivers/vin/vin-video/vin_video.c
-+++ b/drivers/vin/vin-video/vin_video.c
+diff -ruN a/drivers/vin/vin-isp/sunxi_isp.c b/drivers/vin/vin-isp/sunxi_isp.c
+--- a/drivers/vin/vin-isp/sunxi_isp.c	2026-10-16 05:48:51.084000049 +0000
++++ b/drivers/vin/vin-isp/sunxi_isp.c	2026-10-16 05:48:51.088000049 +0000
+@@ -65,8 +65,8 @@
+ 
+ #define MIN_IN_WIDTH			192
+ #define MIN_IN_HEIGHT			128
+-#define MAX_IN_WIDTH			4224
+-#define MAX_IN_HEIGHT			4224
++#define MAX_IN_WIDTH			4800
++#define MAX_IN_HEIGHT			4800
+ 
+ #if defined CONFIG_ARCH_SUN65IW1
+ #define TDM_RDMA_FIFO_LOW_LIMIT		0x07
+@@ -1108,8 +1108,8 @@
+ 				mf->width = clamp_t(u32, mf->width, MIN_IN_WIDTH, 3264);
+ 				mf->height = clamp_t(u32, mf->height, MIN_IN_HEIGHT, 3264);
+ 			} else {
+-				mf->width = clamp_t(u32, mf->width, MIN_IN_WIDTH, 4224);
+-				mf->height = clamp_t(u32, mf->height, MIN_IN_HEIGHT, 4224);
++				mf->width = clamp_t(u32, mf->width, MIN_IN_WIDTH, 4800);
++				mf->height = clamp_t(u32, mf->height, MIN_IN_HEIGHT, 4800);
+ 			}
+ 		}
+ 
+diff -ruN a/drivers/vin/vin-video/vin_video.c b/drivers/vin/vin-video/vin_video.c
+--- a/drivers/vin/vin-video/vin_video.c	2026-10-16 05:48:51.072000049 +0000
++++ b/drivers/vin/vin-video/vin_video.c	2026-10-16 05:48:51.076000049 +0000
 @@ -2468,6 +2468,24 @@
  	v4l2_ctrl_handler_setup(cap->pipe.sd[VIN_IND_SENSOR]->ctrl_handler);
  	 */
@@ -69,3 +95,24 @@
  		switch (ctrl->id) {
  		case V4L2_CID_BRIGHTNESS:
  		case V4L2_CID_CONTRAST:
+diff -ruN a/drivers/vin/vin-vipp/sunxi_scaler.c b/drivers/vin/vin-vipp/sunxi_scaler.c
+--- a/drivers/vin/vin-vipp/sunxi_scaler.c	2026-10-16 05:48:51.092000049 +0000
++++ b/drivers/vin/vin-vipp/sunxi_scaler.c	2026-10-16 05:48:51.092000049 +0000
+@@ -32,13 +32,13 @@
+ 
+ #define MIN_IN_WIDTH			192
+ #define MIN_IN_HEIGHT			128
+-#define MAX_IN_WIDTH			4224
+-#define MAX_IN_HEIGHT			4224
++#define MAX_IN_WIDTH			4800
++#define MAX_IN_HEIGHT			4800
+ 
+ #define MIN_OUT_WIDTH			16
+ #define MIN_OUT_HEIGHT			10
+-#define MAX_OUT_WIDTH			4224
+-#define MAX_OUT_HEIGHT			4224
++#define MAX_OUT_WIDTH			4800
++#define MAX_OUT_HEIGHT			4800
+ 
+ #define MIN_RATIO			256
+ #if IS_ENABLED(CONFIG_ARCH_SUN8IW12P1) || IS_ENABLED(CONFIG_ARCH_SUN8IW15P1) || IS_ENABLED(CONFIG_ARCH_SUN8IW16P1) || IS_ENABLED(CONFIG_ARCH_SUN8IW17P1)

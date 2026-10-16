@@ -82,6 +82,7 @@ MODULE_PARM_DESC(term_res, "enable the 100ohm MIPI termination (1) or not (0)");
 #define I2C_ADDR 0x34		/* 7-bit 0x1a, the BSP takes the 8-bit form */
 #define SENSOR_NAME "imx519_mipi"
 static int imx519_mipi_sensor_vts;
+static int imx519_test_pattern;		/* last value of the test_pattern control (re-applied every stream start) */
 
 struct cfg_array {		/* coming later */
 	struct regval_list *regs;
@@ -1325,19 +1326,7 @@ static int sensor_reg_init(struct sensor_info *info)
 	/* the frame length of THIS mode must be known before any exposure is written */
 	imx519_mipi_sensor_vts = wsize->vts;
 
-	/* values set through the standard V4L2 controls before streaming started survive the table writes */
-	if (exp_us <= 0 && info->exp > 0) {
-		sensor_write(sd, 0x0104, 0x01);
-		imx519_write_exposure(sd, info->exp);
-		sensor_write(sd, 0x0104, 0x00);
-	}
-	if (gain_x16 <= 0 && info->gain > 0) {
-		sensor_write(sd, 0x0104, 0x01);
-		imx519_write_gain(sd, info->gain);
-		sensor_write(sd, 0x0104, 0x00);
-	}
-
-	/* caller-chosen exposure/gain (module parameters): apply before the first useful frame */
+	/* module parameters: defaults for programs that do not use the V4L2 controls */
 	if (exp_us > 0 || gain_x16 > 0) {
 		sensor_write(sd, 0x0104, 0x01);
 		if (exp_us > 0) {
@@ -1351,6 +1340,23 @@ static int sensor_reg_init(struct sensor_info *info)
 			imx519_write_gain(sd, gain_x16);
 		sensor_write(sd, 0x0104, 0x00);
 		sensor_print("applied exp_us=%d gain_x16=%d\n", exp_us, gain_x16);
+	}
+
+	/* values set through the standard V4L2 controls take priority over the module parameters */
+	if (info->exp > 0) {
+		sensor_write(sd, 0x0104, 0x01);
+		imx519_write_exposure(sd, info->exp);
+		sensor_write(sd, 0x0104, 0x00);
+	}
+	if (info->gain > 0) {
+		sensor_write(sd, 0x0104, 0x01);
+		imx519_write_gain(sd, info->gain);
+		sensor_write(sd, 0x0104, 0x00);
+	}
+
+	if (imx519_test_pattern) {
+		sensor_write(sd, 0x0600, 0x00);
+		sensor_write(sd, 0x0601, imx519_test_pattern);
 	}
 
 	/* start streaming last, so the first frame already uses the chosen exposure and gain */
@@ -1419,6 +1425,11 @@ static int sensor_s_ctrl(struct v4l2_ctrl *ctrl)
 		return sensor_s_gain(sd, ctrl->val);
 	case V4L2_CID_EXPOSURE:
 		return sensor_s_exp(sd, ctrl->val);
+	case V4L2_CID_TEST_PATTERN:
+		imx519_test_pattern = ctrl->val;
+		sensor_write(sd, 0x0600, 0x00);
+		sensor_write(sd, 0x0601, ctrl->val);
+		return 0;
 	}
 	return -EINVAL;
 }
@@ -1479,6 +1490,10 @@ static const struct v4l2_ctrl_config sensor_custom_ctrls[] = {
 	},
 };
 
+static const char * const imx519_test_pattern_menu[] = {
+	"Disabled", "Solid Color", "100% Color Bars", "Fade to Grey Color Bars", "PN9",
+};
+
 static int sensor_init_controls(struct v4l2_subdev *sd, const struct v4l2_ctrl_ops *ops)
 {
 	struct sensor_info *info = to_state(sd);
@@ -1487,13 +1502,16 @@ static int sensor_init_controls(struct v4l2_subdev *sd, const struct v4l2_ctrl_o
 	int i;
 	int ret = 0;
 
-	v4l2_ctrl_handler_init(handler, 2 + ARRAY_SIZE(sensor_custom_ctrls));
+	v4l2_ctrl_handler_init(handler, 3 + ARRAY_SIZE(sensor_custom_ctrls));
 
 	ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_EXPOSURE, 0,
 			      0x7ffffff, 1, 0);		/* about 8 million lines: long exposures */
 	(void)ctrl;	/* not volatile: the value last set is the value reported */
 	v4l2_ctrl_new_std(handler, ops, V4L2_CID_GAIN, 16,
 			      IMX519_GAIN_MAX_X16, 1, 16);		/* gain x16: 16 = 1x ... 1024 = 64x */
+	v4l2_ctrl_new_std_menu_items(handler, ops, V4L2_CID_TEST_PATTERN,
+				     ARRAY_SIZE(imx519_test_pattern_menu) - 1, 0, 0,
+				     imx519_test_pattern_menu);
 	for (i = 0; i < ARRAY_SIZE(sensor_custom_ctrls); i++)
 		v4l2_ctrl_new_custom(handler, &sensor_custom_ctrls[i], NULL);
 

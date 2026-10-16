@@ -17,14 +17,15 @@ has a few traps that cost the author days. This repository documents and fixes a
 
 | Feature | State |
 |---|---|
-| RAW10 Bayer capture, 720p / 1080p / 2328×1748 / 3840×2160 / full (4224×3496) | works |
+| RAW10 Bayer capture at the sensor's rated speeds: 720p 85 fps, 1080p 60, 2328×1748 30, 3840×2160 18, **full 4656×3496 9.4 fps** | works |
 | Exact manual exposure, 1/10000 s … 15 s tested (hardware allows ~118 s) | works |
 | Manual gain 1× … 64× (analog to 16×, then digital) | works |
 | Standard V4L2 controls on `/dev/video0`: `exposure`, `gain`, `focus_absolute` | works (needs the VIN patch) |
 | Standard V4L2 exposure / gain on the sensor sub-device `/dev/v4l-subdev0`, live while streaming | works |
 | Autofocus motor (AK7375) as a V4L2 actuator sub-device | works |
 | Contrast autofocus (one-shot sweep) and continuous autofocus (user space) | works |
-| JPEG stills + raw **DNG** (opens in Lightroom / RawTherapee / darktable / dcraw) | works (`a7zcam still`) |
+| JPEG stills + raw **DNG** (opens in Lightroom / RawTherapee / darktable / dcraw); colour matrix from the Pi's IMX519 tuning | works (`a7zcam still`) |
+| Sensor test pattern as the standard `test_pattern` V4L2 control | works |
 | Web live view with exposure, gain, focus, AE, AWB, autofocus | works (`a7zcam live`) |
 | Long-exposure / astro use (persistent stream, no wasted first frame) | works, see [docs/USAGE.md](docs/USAGE.md) |
 
@@ -34,7 +35,6 @@ has a few traps that cost the author days. This repository documents and fixes a
   white balance, demosaic, auto exposure, autofocus) is done in user space by the tools here. Colour is
   "good", not tuned: no lens-shading correction, no noise reduction.
 * **Only the RAW formats stream** (`RG10`, `RG12`); the ISP-processed formats (`NV12`, `RGB3`, …) deliver no frames.
-* The VIN limits the width to **4224 px**: the sensor's full 4656 px are cropped to the left 4224 columns.
 * The sensor's **oscillator frequency drifts ~1 %** between boots (frame times are not constant to better than that).
 * Exposure changes need ~2 frames to reach the output (a sensor property). A fresh stream always wastes its first
   frame (a VIN property): keep the stream open for continuous capture.

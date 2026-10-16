@@ -104,7 +104,7 @@ if [ "$PATCH_VIN" = 1 ]; then
     # the sensor/actuator subdirectories must not be rebuilt here
     echo '# (intentionally empty: built separately)' > "$VW/drivers/vin/modules/sensor/Makefile"
     echo '# (intentionally empty: built separately)' > "$VW/drivers/vin/modules/actuator/Makefile"
-    ( cd "$VW" && patch -p1 < "$REPO/patches/vin_video_no_isp_null.patch" ) || die "VIN patch does not apply to this BSP revision"
+    ( cd "$VW" && patch -p1 < "$REPO/patches/vin_core_fixes.patch" ) || die "VIN patch does not apply to this BSP revision"
     ( cd "$VW/drivers/vin" && KCFLAGS="$(VINCFLAGS "$VW")" make -C "$KBUILD" M="$VW/drivers/vin" KBUILD_MODPOST_WARN=1 modules >"$WORK/build_vin.log" 2>&1 ) \
       || { tail -20 "$WORK/build_vin.log"; die "VIN build failed (log: $WORK/build_vin.log)"; }
     for m in vin_io vin_v4l2; do
@@ -148,6 +148,7 @@ if [ "$DO_TOOLS" = 1 ]; then
   run mkdir -p /opt/a7zcam
   run install -m 755 "$REPO/tools/a7zcam.py"   /opt/a7zcam/a7zcam.py
   run install -m 644 "$REPO/tools/liveview.py" /opt/a7zcam/liveview.py
+  run install -m 644 "$REPO/tools/imx519_color.json" /opt/a7zcam/imx519_color.json
   run ln -sf /opt/a7zcam/a7zcam.py /usr/local/bin/a7zcam
   if ! python3 -c "import numpy, cv2" 2>/dev/null; then
     warn "python3 numpy/opencv missing: apt install python3-numpy python3-opencv"

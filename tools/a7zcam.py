@@ -23,7 +23,7 @@ MODES = {
     "1080p": (1920, 1080, 1088, 6027, 1180),
     "2k": (2328, 1748, 1766, 6512, 2184),
     "4k": (3840, 2160, 2160, 10486, 2260),
-    "full": (4224, 3496, 3504, 12650, 3572),     # the sensor is 4656 wide, the VIN keeps the left 4224
+    "full": (4656, 3496, 3504, 12650, 3572),     # the full sensor width (needs the patched VIN, see docs)
 }
 I2C_BUS, SENSOR_ADDR, VCM_ADDR = "/dev/i2c-3", 0x1A, 0x0C
 PARAMS = "/sys/module/imx519_mipi/parameters"
@@ -141,6 +141,11 @@ class Camera:
 
     def close(self):
         self.stop_flag = True
+        for p in ("exp_us", "gain_x16"):            # leave no override behind for other programs
+            try:
+                open(f"{PARAMS}/{p}", "w").write("0")
+            except OSError:
+                pass
         if self.proc:
             self.proc.terminate()
             try:
@@ -166,8 +171,75 @@ class Camera:
         mr, mg, mb = max(r.mean(), 1.0), max(g.mean(), 1.0), max(b.mean(), 1.0)
         return np.clip(np.array([mg / mr, 1.0, mg / mb], np.float32), 0.3, 6.0)
 
-    def to_rgb(self, a, full_res=False, wb=None):
-        """16-bit RAW10 mosaic -> 8-bit RGB. full_res=True demosaics (cv2); otherwise 2x2 binning (fast)."""
+    # ------------------------------------------------------------------ colour (Raspberry Pi tuning data for this sensor)
+    _color = None
+
+    @classmethod
+    def color_data(cls):
+        if cls._color is None:
+            here = os.path.dirname(os.path.abspath(__file__))
+            for p in (os.path.join(here, "imx519_color.json"), "/opt/a7zcam/imx519_color.json"):
+                try:
+                    d = json.load(open(p))
+                    cls._color = dict(ct=np.array(d["ct_curve"], np.float64),
+                                      ccm_ct=np.array([c["ct"] for c in d["ccms"]], np.float64),
+                                      ccm=np.array([c["ccm"] for c in d["ccms"]], np.float64).reshape(-1, 3, 3),
+                                      gamma=np.array(d["gamma_curve"], np.float64))
+                    break
+                except (OSError, ValueError, KeyError):
+                    continue
+            else:
+                cls._color = False
+        return cls._color
+
+    def estimate_awb(self, a):
+        """Gray-world ratios projected onto the sensor's white-point curve -> (colour temperature K, white balance gains)."""
+        c = self.color_data()
+        r, g, b = self.planes(a)
+        mr, mg, mb = max(r.mean(), 1.0), max(g.mean(), 1.0), max(b.mean(), 1.0)
+        if not c:
+            return None, np.clip(np.array([mg / mr, 1.0, mg / mb], np.float32), 0.3, 6.0)
+        rg, bg = mr / mg, mb / mg                              # measured (R/G, B/G) of the "grey" scene
+        ct, rr, bb = c["ct"][:, 0], c["ct"][:, 1], c["ct"][:, 2]
+        k = np.linspace(ct[0], ct[-1], 400)                    # walk the curve, take the closest point
+        cr, cb = np.interp(k, ct, rr), np.interp(k, ct, bb)
+        i = int(np.argmin((cr - rg) ** 2 + (cb - bg) ** 2))
+        return float(k[i]), np.array([1.0 / cr[i], 1.0, 1.0 / cb[i]], np.float32)
+
+    def ccm_for(self, ct):
+        c = self.color_data()
+        if not c or ct is None:
+            return np.eye(3)
+        t = min(max(ct, c["ccm_ct"][0]), c["ccm_ct"][-1])
+        j = int(np.searchsorted(c["ccm_ct"], t))
+        if j == 0:
+            return c["ccm"][0]
+        t0, t1 = c["ccm_ct"][j - 1], c["ccm_ct"][j]
+        w = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+        return (1 - w) * c["ccm"][j - 1] + w * c["ccm"][j]
+
+    def tone_lut(self, srgb=True):
+        c = self.color_data()
+        x = np.linspace(0, 1, 4096)
+        if srgb:
+            return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 1e-9), 1 / 2.4) - 0.055)
+        if c:
+            return np.interp(x * 65535.0, c["gamma"][:, 0], c["gamma"][:, 1]) / 65535.0
+        return x ** (1 / 2.2)
+
+    def develop(self, rgb_lin, ct=None, tuned=True, strength=0.6, srgb=True):
+        """linear white-balanced RGB (0..1) -> 8-bit: colour matrix, then the contrast/gamma curve."""
+        if tuned and self.color_data():
+            m = self.ccm_for(ct)
+            m = (np.eye(3) + strength * (m - np.eye(3))).astype(np.float32)    # strength 1 = the Pi matrix, 0 = none
+            rgb_lin = np.clip(rgb_lin.reshape(-1, 3) @ m.T, 0, 1).reshape(rgb_lin.shape)
+        lut = self.tone_lut(srgb)
+        idx = np.clip((rgb_lin * 4095.0).astype(np.int32), 0, 4095)
+        return (lut[idx] * 255.0 + 0.5).astype(np.uint8)
+
+    def to_rgb(self, a, full_res=False, wb=None, ct=None, tuned=False, strength=0.6):
+        """16-bit RAW10 mosaic -> 8-bit RGB. full_res=True demosaics (cv2); otherwise 2x2 binning (fast).
+        tuned=True applies the colour matrix and tone curve from the Raspberry Pi tuning data for this sensor."""
         wb = self.wb if wb is None else wb
         if full_res:
             lin = np.clip((a.astype(np.float32) - BLACK) / (FULL - BLACK), 0, 1)
@@ -177,6 +249,8 @@ class Camera:
         else:
             r, g, b = self.planes(a)
             rgb = np.dstack([r * wb[0], g * wb[1], b * wb[2]]) / (FULL - BLACK)
+        if tuned:
+            return self.develop(np.clip(rgb, 0, 1), ct, True, strength)
         return (np.clip(rgb, 0, 1) ** (1 / 2.2) * 255).astype(np.uint8)
 
     def sharpness(self, a):
@@ -303,11 +377,12 @@ def cmd_still(a):
             if not a.exposure:
                 cam.auto_exposure(iters=4)
         raw = cam.wait_frames(2 if cam.exp < 0.3 else 1)
-        wb = cam.awb_gains(raw)
-        rgb = orient(cam.to_rgb(raw, full_res=True, wb=wb), a.rotate, a.hflip, a.vflip)
+        ct, wb = cam.estimate_awb(raw) if a.color == "tuned" else (None, cam.awb_gains(raw))
+        rgb = orient(cam.to_rgb(raw, full_res=True, wb=wb, ct=ct, tuned=(a.color == "tuned"), strength=a.saturation), a.rotate, a.hflip, a.vflip)
         cv2.imwrite(a.output, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
         if a.raw:
             write_dng(a.raw, raw, exp=cam.exp, gain=cam.gain, as_shot=wb.tolist())
+        print(f"colour temperature estimate: {ct:.0f} K" if ct else "", end="\n" if ct else "")
         print(f"saved {a.output}  {rgb.shape[1]}x{rgb.shape[0]}  exposure {cam.exp:.4f}s gain {cam.gain:.1f}x focus {cam.pos}" +
               (f"  raw {a.raw}" if a.raw else ""))
 
@@ -330,6 +405,8 @@ def main():
     s.add_argument("--size", default="full", choices=list(MODES))
     s.add_argument("--exposure", type=float); s.add_argument("--gain", type=float)
     s.add_argument("--focus", type=int); s.add_argument("--af", action="store_true"); s.add_argument("--raw")
+    s.add_argument("--color", default="tuned", choices=["tuned", "simple"], help="tuned = Raspberry Pi colour matrix + sRGB curve (default), simple = gray-world only")
+    s.add_argument("--saturation", type=float, default=0.6, help="strength of the colour matrix: 1 = the Pi matrix as is, 0 = none (default 0.6)")
     s.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270], help="rotate the picture (clockwise degrees)")
     s.add_argument("--hflip", action="store_true"); s.add_argument("--vflip", action="store_true")
     s.set_defaults(fn=cmd_still)

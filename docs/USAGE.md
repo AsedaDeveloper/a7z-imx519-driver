@@ -2,15 +2,16 @@
 
 ## a7zcam (still, raw, focus, live view)
 ```bash
-a7zcam still out.jpg                        # full resolution (4224x3496), auto exposure
+a7zcam still out.jpg                        # full resolution (4656x3496), auto exposure
 a7zcam still out.jpg --size 1080p --af      # autofocus first
 a7zcam still out.jpg --exposure 0.5 --gain 4 --focus 2400 --raw out.dng
 a7zcam still out.jpg --rotate 90 --hflip    # orientation is done in software
+a7zcam still out.jpg --color simple          # plain gray-world white balance; default is `--color tuned --saturation 0.6`
 a7zcam focus --af                           # autofocus, prints the lens position (0 = infinity .. 4095 = nearest)
 a7zcam focus --set 2000
 a7zcam live --port 8080                     # web live view: exposure, gain, focus, AE, AWB, autofocus, continuous AF
 ```
-Sizes: `720p 1080p 2k (2328x1748) 4k (3840x2160) full (4224x3496)`. The camera device can only be used by one program at
+Sizes: `720p 1080p 2k (2328x1748) 4k (3840x2160) full (4656x3496)`. The camera device can only be used by one program at
 a time (`/dev/video0` is exclusive): stop the live view before taking stills.
 
 Environment for the live view: `LIVEVIEW_PORT`, `LIVEVIEW_ROTATE=0|90|180|270`, `LIVEVIEW_FLIP=h|v|hv`.
@@ -48,3 +49,12 @@ stream start), `init_delay_ms`, `stream_delay_ms`, `term_res`, `phy_offset`.
 
 ## Orientation of the picture
 The raw image is not rotated. Mounted with the cable on the left it appears rotated 90°; use `--rotate`.
+
+## Colour
+`a7zcam still` converts the raw frame itself: black-level subtraction, demosaic, white balance, then a colour
+matrix and tone curve. The white-point curve and colour matrices come from the **Raspberry Pi tuning data for the
+IMX519** (`tools/imx519_color.json`, BSD-2-Clause, libcamera project); the colour temperature is estimated from the
+scene (gray-world ratios projected onto that curve). The Pi matrices are applied at 60 % strength by default because
+the full strength looks over-saturated without the rest of the Pi's pipeline. This is a *reasonable* rendering, not
+a calibrated one: there is no lens-shading correction, and the colour was judged by eye, not against a colour chart.
+For accurate colour develop the raw DNG in a raw converter with your own profile.

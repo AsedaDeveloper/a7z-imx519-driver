@@ -414,6 +414,9 @@ def main():
     finally:
         CAM.stop = True
         if CAM.proc: CAM.proc.terminate()
+        for p in ("exp_us", "gain_x16"):
+            try: open(f"/sys/module/imx519_mipi/parameters/{p}", "w").write("0")
+            except OSError: pass
 
 
 if __name__ == "__main__":

@@ -59,6 +59,12 @@ start at 2). A one-shot capture costs ~2 exposures; use a persistent stream (`to
 Frame length applies at once, but the coarse integration time reaches the output **two frames later**. Only the
 very first exposure (written before streaming starts, which the driver does last) is immediate.
 
+## Trap 9 - the VIN refuses frames wider than 4224 px (fixed by the patch)
+The Allwinner ISP and scaler sub-devices clamp the width to a hard-coded 4224 (`MAX_IN_WIDTH` in `sunxi_isp.c` and
+`sunxi_scaler.c`), so a request for the sensor's full 4656 columns silently becomes 4224 and the right 432 columns are
+lost. With the ISP bypassed the hardware has no such limit: the patch raises the clamps to 4800 and full-width raw
+frames work (verified with the sensor's colour-bar test pattern: eight bars across all 4656 columns, no overflow).
+
 ## Useful debugging recipes
 * **Real line length the sensor sends** (shows mode / I2C problems): the combo CSI port's packet-header register,
   `devmem` / `/dev/mem` at physical `0x5810000 + 0x151c` while streaming (bits 31:16 = word count in bytes, bits 5:0 =
