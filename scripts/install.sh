@@ -21,15 +21,15 @@ BSP_TAG="cubie-aiot-v1.5.0"
 BSP_URL="https://github.com/radxa/allwinner-bsp.git"
 WORK="/opt/a7z-imx519-driver"
 BSP="${WORK}/bsp"
-PATCH_VIN=1; DO_OVERLAY=1; DO_TOOLS=1; DRY=0; FORCE=0
+PATCH_VIN=1; DO_OVERLAY=1; DO_TOOLS=1; DRY=0; FORCE=0; BSP_GIVEN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-vin-patch) PATCH_VIN=0 ;;
     --no-overlay)   DO_OVERLAY=0 ;;
     --no-tools)     DO_TOOLS=0 ;;
-    --bsp-dir)      BSP="$2"; shift ;;
-    --work-dir)     WORK="$2"; BSP="${WORK}/bsp"; shift ;;
+    --bsp-dir)      BSP="$2"; BSP_GIVEN=1; shift ;;
+    --work-dir)     WORK="$2"; [ "$BSP_GIVEN" = 1 ] || BSP="${WORK}/bsp"; shift ;;
     --dry-run)      DRY=1 ;;
     --force)        FORCE=1 ;;   # continue even if the board / kernel is not the tested one
     -h|--help)      sed -n '2,17p' "$0"; exit 0 ;;
