@@ -81,6 +81,19 @@ sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugi
 crashes with SIGSEGV when started from ssh or a service as a normal user without it). Log out and in once so your
 user is in the `video` group.
 
+## Virtual webcam (browsers, ffmpeg, OpenCV, Frigate ...)
+The camera itself only delivers raw Bayer frames on `/dev/video0`, which ordinary applications cannot use. `a7zcam webcam`
+publishes a normal webcam, `/dev/video20` (YUYV, 1920x1080 at 30 fps by default), through the `v4l2loopback` module:
+```bash
+sudo apt install v4l2loopback-dkms          # once; install.sh then loads it at boot
+a7zcam webcam --size 1080p --fps 30 [--rotate 90 --af]     # keep it running, stop it with Ctrl-C
+ffmpeg -f v4l2 -i /dev/video20 -t 5 out.mp4        # any V4L2 application can now open /dev/video20
+```
+Verified: `ffmpeg -f v4l2` and OpenCV `cv2.VideoCapture("/dev/video20", cv2.CAP_V4L2)` read 1080p at 30 fps. It uses about
+4 cores while running (demosaic + tone curve + conversion). Only one program can use the camera at a time: while the
+webcam runs, `a7zcam still` and the live view cannot, and the other way round. A systemd unit is in
+`tools/a7zcam-webcam.service` (copied to `/opt/a7zcam/`, not enabled).
+
 ## Calibration for better pictures (optional)
 **Dark frames and hot pixels (long exposures).** Cap the lens completely, then make a master dark with the *same
 exposure and gain* you will shoot with, and use it on the stills:

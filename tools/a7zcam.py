@@ -493,6 +493,31 @@ def hw_encoder_available():
         return False
 
 
+def ensure_loopback(dev):
+    """Make sure the virtual camera device exists (loads the v4l2loopback kernel module; needs root the first time)."""
+    if os.path.exists(dev):
+        return
+    nr = "".join(ch for ch in dev if ch.isdigit())
+    cmd = ["modprobe", "v4l2loopback", f"video_nr={nr}", "card_label=IMX519 (A7Z)", "exclusive_caps=1"]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n"] + cmd
+    subprocess.run(cmd, check=False)
+    if not os.path.exists(dev):
+        raise SystemExit(f"{dev} does not exist. Install v4l2loopback (sudo apt install v4l2loopback-dkms) and run once as root: "
+                         f"sudo modprobe v4l2loopback video_nr={nr} card_label='IMX519 (A7Z)' exclusive_caps=1")
+
+
+def cmd_webcam(a):
+    """Virtual webcam: expose the camera as a normal V4L2 YUYV device that browsers, ffmpeg, OpenCV, Frigate ... can open."""
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    a.output = a.device; a.seconds = 0; a.encoder = "sw"; a.bitrate = 0; a.preset = "veryfast"; a.crf = 23
+    try:
+        cmd_video(a)
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_video(a):
     """Record H.264 video: raw frames -> demosaic + white balance + tone curve (user space) -> ffmpeg/libx264."""
     W, H = MODES[a.size][0], MODES[a.size][1]
@@ -525,9 +550,17 @@ def cmd_video(a):
         cmdline = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bayer_rggb8", "-s", f"{W}x{H}",
                    "-use_wallclock_as_timestamps", "1", "-i", "-"]
         if vf: cmdline += ["-vf", ",".join(vf)]
-        use_hw = a.encoder == "hw" or (a.encoder == "auto" and hw_encoder_available())
+        webcam = a.output.startswith("/dev/video")
+        use_hw = (not webcam) and (a.encoder == "hw" or (a.encoder == "auto" and hw_encoder_available()))
         gst = None
-        if use_hw:
+        if webcam:
+            ensure_loopback(a.output)
+            # NV12 from OpenCV -> ffmpeg -> YUYV into the v4l2loopback device (the format every webcam application accepts)
+            wc = ["ffmpeg", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "nv12", "-s", f"{ow}x{oh}", "-framerate", str(a.fps),
+                  "-i", "-", "-pix_fmt", "yuyv422", "-f", "v4l2", a.output]
+            gst = subprocess.Popen(wc, stdin=subprocess.PIPE)
+            ff = gst
+        elif use_hw:
             # OpenCV demosaics to NV12 and the Allwinner hardware encoder (Cedar VE, via GStreamer OMX) does the H.264
             bitrate = a.bitrate or int(max(1.5e6, min(25e6, ow * oh * a.fps * 0.09)))
             gstline = ["gst-launch-1.0", "-q", "-e", "fdsrc", "fd=0", "!",
@@ -543,8 +576,8 @@ def cmd_video(a):
         period, t0 = 1.0 / a.fps, time.time()
         nxt, last, n, ae_n = t0, None, 0, -1
         cur = None
-        while time.time() - t0 < a.seconds:
-            if use_hw:
+        while a.seconds <= 0 or time.time() - t0 < a.seconds:
+            if use_hw or webcam:
                 raw, seq = cam.latest(after=last, timeout=0.002)
                 now = time.time()
                 if raw is not None:
@@ -586,9 +619,9 @@ def cmd_video(a):
         ff.stdin.close(); ff.wait()
         if gst is not None:
             gst.wait()
-        print(f"encoder: {'hardware (Cedar VE, omxh264videoenc)' if use_hw else 'software (libx264)'}")
+        print(f"encoder: {'virtual webcam ' + a.output if webcam else ('hardware (Cedar VE, omxh264videoenc)' if use_hw else 'software (libx264)')}")
         print(f"sensor delivered {cam.fps:.1f} fps, exposure {cam.exp:.4f}s gain {cam.gain:.1f}x")
-        print(f"saved {a.output}: {n} frames in {time.time() - t0:.1f}s ({n / (time.time() - t0):.1f} fps), {ow}x{oh}")
+        print(f"{'streamed to' if webcam else 'saved'} {a.output}: {n} frames in {time.time() - t0:.1f}s ({n / (time.time() - t0):.1f} fps), {ow}x{oh}")
 
 
 def cmd_lsc(a):
@@ -652,6 +685,11 @@ def main():
     v.add_argument("--focus", type=int); v.add_argument("--af", action="store_true")
     v.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270]); v.add_argument("--hflip", action="store_true"); v.add_argument("--vflip", action="store_true")
     v.set_defaults(fn=cmd_video)
+    w = sub.add_parser("webcam", help="virtual webcam (/dev/video20 via v4l2loopback) for browsers, ffmpeg, OpenCV, Frigate ...")
+    w.add_argument("--device", default="/dev/video20"); w.add_argument("--size", default="1080p", choices=list(MODES))
+    w.add_argument("--fps", type=int, default=30); w.add_argument("--focus", type=int); w.add_argument("--af", action="store_true")
+    w.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270]); w.add_argument("--hflip", action="store_true"); w.add_argument("--vflip", action="store_true")
+    w.set_defaults(fn=cmd_webcam)
     lc = sub.add_parser("lsc-calibrate", help="calibrate lens shading from a uniform white surface")
     lc.add_argument("--size", default="full", choices=list(MODES)); lc.add_argument("-n", type=int, default=8); lc.add_argument("-o", "--output")
     lc.set_defaults(fn=cmd_lsc)

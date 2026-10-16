@@ -28,6 +28,7 @@ has a few traps that cost the author days. This repository documents and fixes a
 | Sensor test pattern as the standard `test_pattern` V4L2 control | works |
 | Lens-shading calibration + dark-frame / hot-pixel correction (`a7zcam lsc-calibrate`, `a7zcam dark`) | works on synthetic data and a smoke test; needs your own calibration shots |
 | H.264 video recording with the **hardware encoder** (Allwinner Cedar VE): 1080p at 30 fps, 720p 30 fps, 4K ~17 fps | works (`a7zcam video`; needs GStreamer + the Allwinner OMX plugin, otherwise falls back to software x264 at ~17 fps) |
+| Virtual webcam `/dev/video20` (YUYV 1080p30) for browsers, ffmpeg, OpenCV, Frigate | works (`a7zcam webcam`, needs `v4l2loopback`) |
 | Web live view with exposure, gain, focus, AE, AWB, autofocus | works (`a7zcam live`) |
 | Long-exposure / astro use (persistent stream, no wasted first frame) | works, see [docs/USAGE.md](docs/USAGE.md) |
 

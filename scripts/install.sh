@@ -181,6 +181,13 @@ if [ "$DO_TOOLS" = 1 ]; then
   if ! python3 -c "import numpy, cv2" 2>/dev/null; then
     warn "python3 numpy/opencv missing: apt install python3-numpy python3-opencv"
   fi
+  if modinfo v4l2loopback >/dev/null 2>&1; then
+    run install -m 644 "$REPO/scripts/v4l2loopback-a7zcam.conf" /etc/modprobe.d/a7zcam-v4l2loopback.conf
+    run sh -c "echo v4l2loopback > /etc/modules-load.d/v4l2loopback.conf"
+    run install -m 644 "$REPO/tools/a7zcam-webcam.service" /opt/a7zcam/a7zcam-webcam.service
+  else
+    warn "virtual webcam (a7zcam webcam) needs: apt install v4l2loopback-dkms   (optional)"
+  fi
   run usermod -aG video,i2c "${SUDO_USER:-radxa}" 2>/dev/null || true
 else say "7/7 tools skipped"; fi
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=IMX519 virtual webcam (/dev/video20)
+After=systemd-modules-load.service
+
+[Service]
+User=radxa
+Group=video
+ExecStart=/usr/bin/python3 /opt/a7zcam/a7zcam.py webcam --size 1080p --fps 30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
