@@ -19,7 +19,7 @@ KVER="$(uname -r)"
 KBUILD="/lib/modules/${KVER}/build"
 BSP_TAG="cubie-aiot-v1.5.0"
 BSP_URL="https://github.com/radxa/allwinner-bsp.git"
-WORK="/opt/imx519-a7z"
+WORK="/opt/a7z-imx519-driver"
 BSP="${WORK}/bsp"
 PATCH_VIN=1; DO_OVERLAY=1; DO_TOOLS=1; DRY=0
 

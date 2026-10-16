@@ -16,7 +16,7 @@ rm -f /boot/dtbo/cubie-a7z-imx519-j5.dtbo
 command -v u-boot-update >/dev/null && u-boot-update >/dev/null 2>&1 || true
 echo "removing tools"
 rm -rf /opt/a7zcam; rm -f /usr/local/bin/a7zcam
-[ "$KEEP" = 1 ] || rm -rf /opt/imx519-a7z
+[ "$KEEP" = 1 ] || rm -rf /opt/a7z-imx519-driver
 depmod -a
 udevadm control --reload || true
 echo "done - reboot to unload the modules"

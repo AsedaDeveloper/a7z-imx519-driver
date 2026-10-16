@@ -8,12 +8,12 @@
 
 ## Install
 ```bash
-git clone https://github.com/<you>/imx519-a7z.git
-cd imx519-a7z
+git clone https://github.com/<you>/a7z-imx519-driver.git
+cd a7z-imx519-driver
 sudo ./scripts/install.sh            # add --no-vin-patch to skip the VIN patch (not recommended)
 sudo reboot
 ```
-Options: `--work-dir DIR` (build area, default `/opt/imx519-a7z`), `--bsp-dir DIR` (reuse an existing BSP checkout),
+Options: `--work-dir DIR` (build area, default `/opt/a7z-imx519-driver`), `--bsp-dir DIR` (reuse an existing BSP checkout),
 `--no-overlay`, `--no-tools`, `--dry-run`.
 
 What it installs: `imx519_mipi.ko` + `ak7375_act.ko` in `/lib/modules/<kernel>/extra/`, patched `vin_io.ko` +
