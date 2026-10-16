@@ -411,6 +411,232 @@ index 4323472..67a3862 100644
  
  	/* Locate the sensors. */
  	std::vector<MediaEntity *> sensors = locateSensors(media);
+diff --git a/src/libcamera/software_isp/debayer_cpu.cpp b/src/libcamera/software_isp/debayer_cpu.cpp
+index 66f6038..9a4999a 100644
+--- a/src/libcamera/software_isp/debayer_cpu.cpp
++++ b/src/libcamera/software_isp/debayer_cpu.cpp
+@@ -642,6 +642,155 @@ void DebayerCpu::memcpyNextLine(const uint8_t *linePointers[])
+ 	lineBufferIndex_ = (lineBufferIndex_ + 1) % (patternHeight + 1);
+ }
+ 
++void DebayerCpu::setupInputMemcpyMt(LineBufState &lb, const uint8_t *linePointers[])
++{
++	const unsigned int patternHeight = inputConfig_.patternSize.height;
++
++	if (!enableInputMemcpy_)
++		return;
++
++	for (unsigned int i = 0; i < patternHeight; i++) {
++		if (lb.buffers[i].empty())
++			lb.buffers[i].resize(lineBufferLength_);
++		memcpy(lb.buffers[i].data(), linePointers[i + 1] - lineBufferPadding_, lineBufferLength_);
++		linePointers[i + 1] = lb.buffers[i].data() + lineBufferPadding_;
++	}
++
++	lb.index = patternHeight;
++}
++
++void DebayerCpu::memcpyNextLineMt(LineBufState &lb, const uint8_t *linePointers[])
++{
++	const unsigned int patternHeight = inputConfig_.patternSize.height;
++
++	if (!enableInputMemcpy_)
++		return;
++
++	if (lb.buffers[lb.index].empty())
++		lb.buffers[lb.index].resize(lineBufferLength_);
++	memcpy(lb.buffers[lb.index].data(), linePointers[patternHeight] - lineBufferPadding_, lineBufferLength_);
++	linePointers[patternHeight] = lb.buffers[lb.index].data() + lineBufferPadding_;
++
++	lb.index = (lb.index + 1) % (patternHeight + 1);
++}
++
++/*
++ * Processes rows [yStart, yEnd) of a 2x2-Bayer-pattern frame, with one thread per band. Only valid
++ * for window_.y == 0 (the whole sensor height, no vertical crop): that is the only configuration
++ * the capture pipeline here ever uses, and process2Threaded() falls back to the single-threaded
++ * process2() for anything else. isFirstBand/isLastBand each independently control the mirrored
++ * border handling at the true top/bottom of the frame; a middle band always has real image data
++ * immediately above and below it to read as "previous"/"next" line, exactly like the un-banded
++ * code reading past its start/end would, so no mirroring is needed there.
++ */
++void DebayerCpu::process2Band(unsigned int yStart, unsigned int yEnd, bool isFirstBand, bool isLastBand,
++			      const uint8_t *src, uint8_t *dst, LineBufState &lb, std::mutex &statsMutex)
++{
++	const uint8_t *linePointers[3];
++	const uint8_t *bandSrc = src + (yStart - window_.y) * inputConfig_.stride;
++	uint8_t *bandDst = dst + (yStart - window_.y) * outputConfig_.stride;
++	unsigned int loopEnd = yEnd;
++
++	if (isFirstBand && yStart == 0) {
++		linePointers[1] = bandSrc + inputConfig_.stride; /* mirror: next line as prev */
++		linePointers[2] = bandSrc;
++		if (isLastBand)
++			loopEnd -= 2; /* last 2 rows handled by the trailing block below */
++	} else {
++		linePointers[1] = bandSrc - inputConfig_.stride; /* real previous line */
++		linePointers[2] = bandSrc;
++		if (isLastBand)
++			loopEnd -= 2;
++	}
++
++	setupInputMemcpyMt(lb, linePointers);
++
++	for (unsigned int y = yStart; y < loopEnd; y += 2) {
++		shiftLinePointers(linePointers, bandSrc);
++		memcpyNextLineMt(lb, linePointers);
++		{
++			std::lock_guard<std::mutex> lock(statsMutex);
++			stats_->processLine0(y, linePointers);
++		}
++		(this->*debayer0_)(bandDst, linePointers);
++		bandSrc += inputConfig_.stride;
++		bandDst += outputConfig_.stride;
++
++		shiftLinePointers(linePointers, bandSrc);
++		memcpyNextLineMt(lb, linePointers);
++		(this->*debayer1_)(bandDst, linePointers);
++		bandSrc += inputConfig_.stride;
++		bandDst += outputConfig_.stride;
++	}
++
++	if (isLastBand) {
++		shiftLinePointers(linePointers, bandSrc);
++		memcpyNextLineMt(lb, linePointers);
++		{
++			std::lock_guard<std::mutex> lock(statsMutex);
++			stats_->processLine0(yEnd, linePointers);
++		}
++		(this->*debayer0_)(bandDst, linePointers);
++		bandSrc += inputConfig_.stride;
++		bandDst += outputConfig_.stride;
++
++		shiftLinePointers(linePointers, bandSrc);
++		linePointers[2] = linePointers[0]; /* next line may point outside src: use prev */
++		(this->*debayer1_)(bandDst, linePointers);
++	}
++}
++
++/*
++ * Splits the frame into one band per CPU (minus a little headroom) and runs them concurrently.
++ * Each band is independent except for the small, mutex-guarded stats_->processLine0() calls, so the
++ * expensive per-pixel demosaic/CCM/gamma work (the actual bottleneck) runs fully in parallel.
++ * Bands are aligned to a 2-row boundary to match the Bayer pattern. Returns false (caller must fall
++ * back to the single-threaded process2()) if the configuration is not one this function supports.
++ */
++bool DebayerCpu::process2Threaded(const uint8_t *src, uint8_t *dst)
++{
++	if (window_.y != 0 || inputConfig_.patternSize.height != 2)
++		return false;
++
++	unsigned int nThreads = debayerThreads_;
++	if (nThreads <= 1)
++		return false;
++
++	/* at least 32 rows per band: no point splitting tiny or odd-shaped windows further */
++	unsigned int maxBands = std::max(1u, window_.height / 32);
++	nThreads = std::min(nThreads, maxBands);
++	if (nThreads <= 1)
++		return false;
++
++	unsigned int rowsPerBand = ((window_.height / nThreads) + 1) & ~1u; /* round up to even */
++	std::vector<LineBufState> lineBufs(nThreads);
++	std::mutex statsMutex;
++	std::vector<std::thread> workers;
++	workers.reserve(nThreads - 1);
++
++	unsigned int y = 0;
++	for (unsigned int i = 0; i < nThreads && y < window_.height; i++) {
++		unsigned int yStart = y;
++		unsigned int yEnd = std::min(y + rowsPerBand, window_.height);
++		bool isFirst = (i == 0);
++		bool isLast = (yEnd >= window_.height);
++		if (i + 1 < nThreads && yEnd < window_.height) {
++			workers.emplace_back(&DebayerCpu::process2Band, this, yStart, yEnd, isFirst, isLast,
++					     src, dst, std::ref(lineBufs[i]), std::ref(statsMutex));
++		} else {
++			/* last live band: run on this (the calling) thread instead of spawning one more */
++			process2Band(yStart, yEnd, isFirst, true, src, dst, lineBufs[i], statsMutex);
++			y = window_.height;
++			break;
++		}
++		y = yEnd;
++	}
++	for (std::thread &t : workers)
++		t.join();
++
++	return true;
++}
++
+ void DebayerCpu::process2(const uint8_t *src, uint8_t *dst)
+ {
+ 	unsigned int yEnd = window_.y + window_.height;
+@@ -807,10 +956,16 @@ void DebayerCpu::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 
+ 	stats_->startFrame();
+ 
+-	if (inputConfig_.patternSize.height == 2)
+-		process2(in.planes()[0].data(), out.planes()[0].data());
+-	else
++	if (debayerThreads_ == 0) {
++		unsigned int hw = std::thread::hardware_concurrency();
++		debayerThreads_ = hw > 2 ? hw - 2 : 1;
++	}
++	if (inputConfig_.patternSize.height == 2) {
++		if (!process2Threaded(in.planes()[0].data(), out.planes()[0].data()))
++			process2(in.planes()[0].data(), out.planes()[0].data());
++	} else {
+ 		process4(in.planes()[0].data(), out.planes()[0].data());
++	}
+ 
+ 	metadata.planes()[0].bytesused = out.planes()[0].size();
+ 
+diff --git a/src/libcamera/software_isp/debayer_cpu.h b/src/libcamera/software_isp/debayer_cpu.h
+index 926195e..eb59e16 100644
+--- a/src/libcamera/software_isp/debayer_cpu.h
++++ b/src/libcamera/software_isp/debayer_cpu.h
+@@ -12,7 +12,9 @@
+ #pragma once
+ 
+ #include <memory>
++#include <mutex>
+ #include <stdint.h>
++#include <thread>
+ #include <vector>
+ 
+ #include <libcamera/base/object.h>
+@@ -132,12 +134,31 @@ private:
+ 	void setupInputMemcpy(const uint8_t *linePointers[]);
+ 	void shiftLinePointers(const uint8_t *linePointers[], const uint8_t *src);
+ 	void memcpyNextLine(const uint8_t *linePointers[]);
++
+ 	void process2(const uint8_t *src, uint8_t *dst);
+ 	void process4(const uint8_t *src, uint8_t *dst);
+ 
+ 	/* Max. supported Bayer pattern height is 4, debayering this requires 5 lines */
+ 	static constexpr unsigned int kMaxLineBuffers = 5;
+ 
++	/*
++	 * Thread-safe variants used by the multi-threaded debayer path: these take their line-buffer
++	 * state explicitly instead of touching the shared lineBuffers_/lineBufferIndex_ members, so
++	 * several bands of the image can be processed concurrently without a data race. The maths is
++	 * identical to the single-threaded versions above; only the storage for the small per-line
++	 * padded copies is private to each thread instead of shared.
++	 */
++	struct LineBufState {
++		std::vector<uint8_t> buffers[kMaxLineBuffers];
++		unsigned int index = 0;
++	};
++	void setupInputMemcpyMt(LineBufState &lb, const uint8_t *linePointers[]);
++	void memcpyNextLineMt(LineBufState &lb, const uint8_t *linePointers[]);
++	void process2Band(unsigned int yStart, unsigned int yEnd, bool isFirstBand, bool isLastBand,
++			  const uint8_t *src, uint8_t *dst, LineBufState &lb, std::mutex &statsMutex);
++	bool process2Threaded(const uint8_t *src, uint8_t *dst);
++	unsigned int debayerThreads_ = 0;	/* 0 = probed lazily on first frame; see configure() */
++
+ 	DebayerParams::LookupTable red_;
+ 	DebayerParams::LookupTable green_;
+ 	DebayerParams::LookupTable blue_;
 diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
 index 28e2a36..02c74b5 100644
 --- a/src/libcamera/software_isp/software_isp.cpp
