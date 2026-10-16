@@ -63,7 +63,8 @@ for t in git make gcc dtc patch python3 xz strip; do command -v "$t" >/dev/null 
 FREE_MB=$(df -Pm "$(dirname "$WORK")" 2>/dev/null | awk 'NR==2{print $4}')
 [ -z "${FREE_MB:-}" ] || [ "$FREE_MB" -ge 1500 ] || die "only ${FREE_MB} MB free where $WORK will live; about 1500 MB are needed for the BSP source and the build"
 if [ ! -d "$BSP/drivers/vin" ]; then
-  git ls-remote --exit-code --tags "$BSP_URL" "refs/tags/$BSP_TAG" >/dev/null 2>&1 \
+  # cubie-aiot-v1.5.0 is a branch upstream (accept a tag of that name too)
+  git ls-remote --exit-code "$BSP_URL" "refs/tags/$BSP_TAG" "refs/heads/$BSP_TAG" >/dev/null 2>&1 \
     || die "cannot reach $BSP_URL (tag $BSP_TAG). Check the network, or pass --bsp-dir with an existing checkout."
 fi
 if [ -e /dev/video0 ] && fuser /dev/video0 >/dev/null 2>&1; then warn "/dev/video0 is in use (live view?). Stop it before rebooting; the install itself is not affected."; fi
