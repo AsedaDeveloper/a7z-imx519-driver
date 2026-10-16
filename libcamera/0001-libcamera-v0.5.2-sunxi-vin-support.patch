@@ -38,8 +38,129 @@ index dcd69d9..929f72d 100644
  class CameraSensorHelperOv2685 : public CameraSensorHelper
  {
  public:
+diff --git a/src/ipa/simple/algorithms/agc.cpp b/src/ipa/simple/algorithms/agc.cpp
+index c46bb0e..9978501 100644
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -41,6 +41,40 @@ Agc::Agc()
+ {
+ }
+ 
++int Agc::init(IPAContext &context, [[maybe_unused]] const YamlObject &tuningData)
++{
++	context.ctrlMap[&controls::AeEnable] = ControlInfo(false, true, true);
++	context.ctrlMap[&controls::ExposureTime] = ControlInfo(1, 120000000, 10000);	/* microseconds */
++	context.ctrlMap[&controls::AnalogueGain] = ControlInfo(1.0f, 64.0f, 1.0f);
++	return 0;
++}
++
++void Agc::queueRequest([[maybe_unused]] IPAContext &context,
++		       [[maybe_unused]] const uint32_t frame,
++		       [[maybe_unused]] IPAFrameContext &frameContext,
++		       const ControlList &controls)
++{
++	const auto &aeEnable = controls.get(controls::AeEnable);
++	const auto &exposureTime = controls.get(controls::ExposureTime);
++	const auto &gain = controls.get(controls::AnalogueGain);
++
++	if (exposureTime) {
++		manualExposureUs_ = *exposureTime;
++		manual_ = true;
++	}
++	if (gain) {
++		manualGain_ = *gain;
++		manual_ = true;
++	}
++	if (aeEnable) {
++		manual_ = !*aeEnable;
++		if (!manual_) {
++			manualExposureUs_ = 0;
++			manualGain_ = 0.0;
++		}
++	}
++}
++
+ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV)
+ {
+ 	/*
+@@ -136,6 +170,23 @@ void Agc::process(IPAContext &context,
+ 	}
+ 
+ 	float exposureMSV = (denom == 0 ? 0 : static_cast<float>(num) / denom);
++
++	metadata.set(controls::AeEnable, !manual_);
++	if (manual_) {
++		const double lineUs = context.configuration.agc.lineDuration.get<std::micro>();
++		if (manualExposureUs_ > 0 && lineUs > 0)
++			frameContext.sensor.exposure = static_cast<int32_t>(manualExposureUs_ / lineUs + 0.5);
++		if (manualGain_ > 0.0)
++			frameContext.sensor.gain = manualGain_;
++		frameContext.sensor.exposure = std::clamp(frameContext.sensor.exposure,
++							  context.configuration.agc.exposureMin,
++							  context.configuration.agc.exposureMax);
++		frameContext.sensor.gain = std::clamp(frameContext.sensor.gain,
++						      context.configuration.agc.againMin,
++						      context.configuration.agc.againMax);
++		return;
++	}
++
+ 	updateExposure(context, frameContext, exposureMSV);
+ }
+ 
+diff --git a/src/ipa/simple/algorithms/agc.h b/src/ipa/simple/algorithms/agc.h
+index 112d9f5..cc164aa 100644
+--- a/src/ipa/simple/algorithms/agc.h
++++ b/src/ipa/simple/algorithms/agc.h
+@@ -19,6 +19,10 @@ public:
+ 	Agc();
+ 	~Agc() = default;
+ 
++	int init(IPAContext &context, const YamlObject &tuningData) override;
++	void queueRequest(IPAContext &context, const uint32_t frame,
++			  IPAFrameContext &frameContext,
++			  const ControlList &controls) override;
+ 	void process(IPAContext &context, const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+@@ -26,6 +30,11 @@ public:
+ 
+ private:
+ 	void updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV);
++
++	/* Manual exposure (AeEnable = false, or ExposureTime / AnalogueGain set by the application) */
++	bool manual_ = false;
++	int32_t manualExposureUs_ = 0;	/* 0 = keep the current exposure */
++	double manualGain_ = 0.0;	/* 0 = keep the current gain */
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index c94c4cd..7d0e3cf 100644
+--- a/src/ipa/simple/soft_simple.cpp
++++ b/src/ipa/simple/soft_simple.cpp
+@@ -303,6 +303,20 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ {
+ 	IPAFrameContext &frameContext = context_.frameContexts.get(frame);
+ 
++	/*
++	 * The sensor controls can be empty for the first frames after a restart (DelayedControls
++	 * was reset); reading them unchecked aborts the process. Check before use.
++	 */
++	if (!sensorControls.contains(V4L2_CID_EXPOSURE) ||
++	    !sensorControls.contains(V4L2_CID_ANALOGUE_GAIN) ||
++	    sensorControls.get(V4L2_CID_EXPOSURE).isNone() ||
++	    sensorControls.get(V4L2_CID_ANALOGUE_GAIN).isNone()) {
++		LOG(IPASoft, Debug) << "Sensor controls not available yet for frame " << frame;
++		/* The pipeline still waits for this frame's metadata. */
++		metadataReady.emit(frame, ControlList(controls::controls));
++		return;
++	}
++
+ 	frameContext.sensor.exposure =
+ 		sensorControls.get(V4L2_CID_EXPOSURE).get<int32_t>();
+ 	int32_t again = sensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
 diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
-index 4323472..3826521 100644
+index 4323472..67a3862 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
 @@ -29,6 +29,7 @@
@@ -50,7 +171,30 @@ index 4323472..3826521 100644
  #include "libcamera/internal/camera.h"
  #include "libcamera/internal/camera_sensor.h"
  #include "libcamera/internal/camera_sensor_properties.h"
-@@ -257,6 +258,7 @@ static const SimplePipelineInfo supportedDevices[] = {
+@@ -199,6 +200,7 @@ public:
+ 	void create(Request *request, bool metadataRequested);
+ 	void destroy(uint32_t frame);
+ 	void clear();
++	std::vector<Request *> requests() const;
+ 
+ 	SimpleFrameInfo *find(uint32_t frame);
+ 
+@@ -223,6 +225,14 @@ void SimpleFrames::clear()
+ 	frameInfo_.clear();
+ }
+ 
++std::vector<Request *> SimpleFrames::requests() const
++{
++	std::vector<Request *> reqs;
++	for (const auto &[frame, info] : frameInfo_)
++		reqs.push_back(info.request);
++	return reqs;
++}
++
+ SimpleFrameInfo *SimpleFrames::find(uint32_t frame)
+ {
+ 	auto info = frameInfo_.find(frame);
+@@ -257,6 +267,7 @@ static const SimplePipelineInfo supportedDevices[] = {
  	{ "mxc-isi", {}, false },
  	{ "qcom-camss", {}, true },
  	{ "sun6i-csi", {}, false },
@@ -58,7 +202,7 @@ index 4323472..3826521 100644
  };
  
  } /* namespace */
-@@ -409,6 +411,8 @@ public:
+@@ -409,6 +420,8 @@ public:
  	V4L2Subdevice *subdev(const MediaEntity *entity);
  	MediaDevice *converter() { return converter_; }
  	bool swIspEnabled() const { return swIspEnabled_; }
@@ -67,7 +211,7 @@ index 4323472..3826521 100644
  
  protected:
  	int queueRequestDevice(Camera *camera, Request *request) override;
-@@ -440,6 +444,7 @@ private:
+@@ -440,6 +453,7 @@ private:
  
  	MediaDevice *converter_;
  	bool swIspEnabled_;
@@ -75,7 +219,7 @@ index 4323472..3826521 100644
  };
  
  /* -----------------------------------------------------------------------------
-@@ -477,7 +482,8 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+@@ -477,7 +491,8 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
  		queue.pop();
  
  		/* Found the capture device. */
@@ -85,7 +229,7 @@ index 4323472..3826521 100644
  			LOG(SimplePipeline, Debug)
  				<< "Found capture device " << entity->name();
  			video = entity;
-@@ -612,6 +618,12 @@ int SimpleCameraData::init()
+@@ -612,6 +627,12 @@ int SimpleCameraData::init()
  	video_ = pipe->video(entities_.back().entity);
  	ASSERT(video_);
  
@@ -98,7 +242,7 @@ index 4323472..3826521 100644
  	/*
  	 * Setup links first as some subdev drivers take active links into
  	 * account to propagate TRY formats. Such is life :-(
-@@ -647,6 +659,9 @@ int SimpleCameraData::init()
+@@ -647,6 +668,9 @@ int SimpleCameraData::init()
  	/* Find the first subdev that can generate a frame start signal, if any. */
  	frameStartEmitter_ = nullptr;
  	for (const Entity &entity : entities_) {
@@ -108,7 +252,7 @@ index 4323472..3826521 100644
  		V4L2Subdevice *sd = pipe->subdev(entity.entity);
  		if (!sd || !sd->supportsFrameStartEvent())
  			continue;
-@@ -691,7 +706,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+@@ -691,7 +715,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
  		return;
  	}
  
@@ -117,7 +261,7 @@ index 4323472..3826521 100644
  
  	LOG(SimplePipeline, Debug)
  		<< "Adding configuration for " << format.size
-@@ -707,6 +722,15 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+@@ -707,6 +731,15 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
  		if (!pixelFormat)
  			continue;
  
@@ -133,7 +277,7 @@ index 4323472..3826521 100644
  		Configuration config;
  		config.code = code;
  		config.sensorSize = size;
-@@ -737,6 +761,10 @@ int SimpleCameraData::setupLinks()
+@@ -737,6 +770,10 @@ int SimpleCameraData::setupLinks()
  {
  	int ret;
  
@@ -144,7 +288,7 @@ index 4323472..3826521 100644
  	/*
  	 * Configure all links along the pipeline. Some entities may not allow
  	 * multiple sink links to be enabled together, even on different sink
-@@ -806,6 +834,10 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
+@@ -806,6 +843,10 @@ int SimpleCameraData::setupFormats(V4L2SubdeviceFormat *format,
  	if (ret < 0)
  		return ret;
  
@@ -155,7 +299,59 @@ index 4323472..3826521 100644
  	for (const Entity &e : entities_) {
  		if (!e.sourceLink)
  			break;
-@@ -1476,13 +1508,29 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+@@ -902,9 +943,14 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ 	Request *request = buffer->request();
+ 
+ 	if (useConversion_ && !conversionQueue_.empty()) {
++		/*
++		 * Use the request recorded with the queued outputs: after a stop/start the output
++		 * buffers request pointer can be stale (null), which crashed in request->sequence().
++		 */
++		request = conversionQueue_.front().request;
+ 		const std::map<const Stream *, FrameBuffer *> &outputs =
+ 			conversionQueue_.front().outputs;
+-		if (!outputs.empty()) {
++		if (!request && !outputs.empty()) {
+ 			FrameBuffer *outputBuffer = outputs.begin()->second;
+ 			if (outputBuffer)
+ 				request = outputBuffer->request();
+@@ -928,7 +974,7 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ 
+ 		if (converter_)
+ 			converter_->queueBuffers(buffer, conversionQueue_.front().outputs);
+-		else
++		else if (request)
+ 			/*
+ 			 * request->sequence() cannot be retrieved from `buffer' inside
+ 			 * queueBuffers because unique_ptr's make buffer->request() invalid
+@@ -936,6 +982,10 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ 			 */
+ 			swIsp_->queueBuffers(request->sequence(), buffer,
+ 					     conversionQueue_.front().outputs);
++		else {
++			video_->queueBuffer(buffer);
++			return;
++		}
+ 
+ 		conversionQueue_.pop();
+ 		return;
+@@ -984,6 +1034,15 @@ void SimpleCameraData::conversionOutputDone(FrameBuffer *buffer)
+ 
+ 	/* Complete the buffer and the request. */
+ 	Request *request = buffer->request();
++	/* A conversion finishing after stop() belongs to no request any more: drop it. */
++	if (!request)
++		return;
++	/* A cancelled frame (stop()) gets no metadata: do not wait for it. */
++	if (buffer->metadata().status == FrameMetadata::FrameCancelled) {
++		SimpleFrameInfo *info = frameInfo_.find(request->sequence());
++		if (info)
++			info->metadataRequired = false;
++	}
+ 	if (pipe->completeBuffer(request, buffer))
+ 		tryCompleteRequest(request);
+ }
+@@ -1476,13 +1535,29 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
  						      &DelayedControls::applyControls);
  	}
  
@@ -186,7 +382,28 @@ index 4323472..3826521 100644
  		if (data->converter_)
  			ret = data->converter_->start();
  		else if (data->swIsp_)
-@@ -1679,6 +1727,7 @@ bool SimplePipelineHandler::matchDevice(MediaDevice *media,
+@@ -1527,8 +1602,19 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+ 
+ 	video->bufferReady.disconnect(data, &SimpleCameraData::imageBufferReady);
+ 
+-	data->frameInfo_.clear();
+ 	data->clearIncompleteRequests();
++	/*
++	 * A request whose conversion output was still in flight when the ISP/converter stopped
++	 * never reaches conversionOutputDone() for that buffer (the ISP cancels its OWN queued
++	 * buffers, which can be leftovers from an even earlier stop, not necessarily this
++	 * request's): such a request would stay in queuedRequests_ forever and trip the
++	 * "queuedRequests_.empty()" assertion on the NEXT stop(). Cancelling it (regardless of
++	 * which buffers are still pending) is safe here and matches clearIncompleteRequests().
++	 */
++	for (Request *request : data->frameInfo_.requests())
++		if (request->status() == Request::RequestPending)
++			cancelRequest(request);
++	data->frameInfo_.clear();
+ 	data->conversionBuffers_.clear();
+ 
+ 	releasePipeline(data);
+@@ -1679,6 +1765,7 @@ bool SimplePipelineHandler::matchDevice(MediaDevice *media,
  	}
  
  	swIspEnabled_ = info.swIspEnabled;

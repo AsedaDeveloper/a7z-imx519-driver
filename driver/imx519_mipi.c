@@ -1386,8 +1386,17 @@ static int sensor_s_stream(struct v4l2_subdev *sd, int enable)
 		  info->current_wins->width,
 		  info->current_wins->height, info->fmt->mbus_code);
 
-	if (!enable)
+	if (!enable) {
+		/*
+		 * VBLANK set through the standard control is a per-STREAM setting in V4L2 (see
+		 * v4l2-ctrls.yaml / the VBLANK control documentation): starting a new stream with
+		 * no VBLANK control write must not inherit a previous session's long-exposure frame
+		 * length. (Found via libcamera soft-ISP restarts: a later session silently reused an
+		 * earlier session's much longer frame period until the control was set again.)
+		 */
+		imx519_user_vblank = 0;
 		return 0;
+	}
 	return sensor_reg_init(info);
 }
 

@@ -39,8 +39,20 @@ lc-a7z gst-launch-1.0 -e libcamerasrc ! video/x-raw,format=RGBA,width=1916,heigh
   strongly coloured rooms.
 * **Auto exposure prefers long exposures:** in a dim room it goes to ~1 s exposures (about 1 fps) unless the application
   limits `FrameDurationLimits`. `cam` does not limit it.
-* **Controls:** libcamera 0.5.2's simple IPA exposes only `Contrast` and `Saturation`; manual `ExposureTime`/`AnalogueGain`
-  and autofocus (`LensPosition`, `AfMode`) are not available through libcamera yet. Use `a7zcam` / V4L2 for those.
+* **Controls:** the patched soft IPA now also exposes `AeEnable`, `ExposureTime` (microseconds) and `AnalogueGain`, verified
+  from Python (`cam.create_request().set_control(...)`); the values are read back correctly in the request metadata.
+  Autofocus (`LensPosition`, `AfMode`) is still not available through libcamera; use `a7zcam` / V4L2 for that.
+* **Known issue: frame period in manual-exposure mode is unreliable** (varies run to run and sometimes within a run,
+  independent of the `ExposureTime` requested, converging to a steady value after a few frames in most but not all
+  cases). The control value itself and its readback are correct; only the resulting real frame rate is not. Not yet
+  root-caused beyond ruling out the sensor driver's persistent VBLANK state (fixed: it is now reset on every stream
+  stop, see `driver/imx519_mipi.c` `sensor_s_stream`). Auto-exposure mode (`AeEnable=true`) is not affected.
+* **Fixed (previously crashed on camera stop/restart):** a second `start()`/`stop()` cycle in the same process used to
+  abort or crash the kernel. Root causes: `IPASoftSimple::processStats` read sensor controls unconditionally even when
+  none were available yet after a reset; `SimpleCameraData::imageBufferReady`/`conversionOutputDone` dereferenced a
+  stale (freed) `Request` from a cancelled buffer of an *earlier* session; and a request whose software-ISP output was
+  still in flight when `stop()` ran never got completed, which tripped libcamera's own `queuedRequests_.empty()`
+  assertion on the *next* `stop()`. Verified with 11 process invocations (33 start/stop cycles total, 3 per invocation) across a reboot, zero crashes.
 * Output widths are 4 px narrower than the sensor mode (software ISP border).
 * Only tested with libcamera v0.5.2.
 
