@@ -85,6 +85,15 @@ tools/liveview.py        web live view with AE, AWB, autofocus       (MIT)
 docs/                    install, usage, hardware, troubleshooting, how it works
 ```
 
+## How this was made
+
+The idea, the hardware, the direction and all of the real-world testing came from **AsedaDeveloper**, who wanted this
+camera to work on the Radxa Cubie A7Z and kept pushing until it did. **All of the code and documentation in this
+repository was written with [Claude](https://claude.com/claude-code) (Anthropic's AI coding assistant)**, working
+interactively on the real board: reading the schematics and the vendor BSP source, building and loading the kernel
+modules, measuring what the hardware actually did, and iterating until it worked. Every claim in the documentation was
+checked on a real A7Z with a real module; where something is untested the text says so.
+
 ## Credits and licences
 
 * Register tables and sensor logic derived from the Raspberry Pi kernel's `imx519` driver (GPL-2.0).
