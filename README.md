@@ -59,7 +59,7 @@ On the A7Z (Radxa Debian 13, kernel `6.6.98-5-aw2511`, network access):
 ```bash
 sudo apt install git build-essential device-tree-compiler patch python3-numpy python3-opencv \
                  linux-headers-$(uname -r)
-git clone https://github.com/<you>/a7z-imx519-driver.git && cd a7z-imx519-driver
+git clone https://github.com/AsedaDeveloper/a7z-imx519-driver.git && cd a7z-imx519-driver
 sudo ./scripts/install.sh
 sudo reboot
 ```

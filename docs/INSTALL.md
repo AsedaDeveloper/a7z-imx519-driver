@@ -8,7 +8,7 @@
 
 ## Install
 ```bash
-git clone https://github.com/<you>/a7z-imx519-driver.git
+git clone https://github.com/AsedaDeveloper/a7z-imx519-driver.git
 cd a7z-imx519-driver
 sudo ./scripts/install.sh            # add --no-vin-patch to skip the VIN patch (not recommended)
 sudo reboot

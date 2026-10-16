@@ -8,3 +8,4 @@ Module.symvers
 modules.order
 *.raw
 *.dng
+.DS_Store
