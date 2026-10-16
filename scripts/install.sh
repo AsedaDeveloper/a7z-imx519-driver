@@ -175,6 +175,14 @@ if [ "$DO_TOOLS" = 1 ]; then
   run install -m 644 "$REPO/tools/liveview.py" /opt/a7zcam/liveview.py
   run install -m 644 "$REPO/tools/imx519_color.json" /opt/a7zcam/imx519_color.json
   run ln -sf /opt/a7zcam/a7zcam.py /usr/local/bin/a7zcam
+  run install -m 755 "$REPO/tools/rpicam.py" /opt/a7zcam/rpicam.py
+  for n in still vid hello; do   # Raspberry-Pi-style commands (only where no real rpicam-apps is installed)
+    for pfx in rpicam libcamera; do
+      if [ ! -e "/usr/local/bin/$pfx-$n" ] || [ "$(readlink "/usr/local/bin/$pfx-$n" 2>/dev/null)" = /opt/a7zcam/rpicam.py ]; then
+        if ! command -v "$pfx-$n" >/dev/null 2>&1 || [ "$(readlink "/usr/local/bin/$pfx-$n" 2>/dev/null)" = /opt/a7zcam/rpicam.py ]; then
+          run ln -sf /opt/a7zcam/rpicam.py "/usr/local/bin/$pfx-$n"; fi; fi
+    done
+  done
   if ! command -v gst-inspect-1.0 >/dev/null || ! gst-inspect-1.0 omxh264videoenc >/dev/null 2>&1; then
     warn "hardware H.264 encoding needs GStreamer + the Allwinner OMX plugin: apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-omx-allwinner (video falls back to software x264 without it)"
   fi

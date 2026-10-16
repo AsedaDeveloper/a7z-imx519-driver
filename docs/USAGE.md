@@ -81,6 +81,18 @@ sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugi
 crashes with SIGSEGV when started from ssh or a service as a normal user without it). Log out and in once so your
 user is in the `video` group.
 
+## Raspberry-Pi-style commands
+`rpicam-still`, `rpicam-vid` and `rpicam-hello` (and the older `libcamera-still` ... names) are installed as thin wrappers
+that translate the common options to `a7zcam`; this is **not** libcamera (see [LIBCAMERA.md](LIBCAMERA.md)):
+```bash
+rpicam-still -o photo.jpg --width 1920 --height 1080 --shutter 20000 --gain 2 --autofocus-mode auto -r   # -r also writes photo.dng
+rpicam-vid   -o clip.h264 -t 10000 --width 1920 --height 1080 --framerate 30 --bitrate 8000000       # .mp4 or raw .h264
+rpicam-hello --list-cameras
+```
+Sizes must be one of the sensor modes (1280x720, 1920x1080, 2328x1748, 3840x2160, 4656x3496); other sizes use the nearest
+larger mode and print a warning (there is no scaler). Unsupported options (`--tuning-file`, `--awb`, `--roi` ...) are
+listed and ignored. `--lens-position` in dioptres is not calibrated (only 0 = infinity is honoured).
+
 ## Virtual webcam (browsers, ffmpeg, OpenCV, Frigate ...)
 The camera itself only delivers raw Bayer frames on `/dev/video0`, which ordinary applications cannot use. `a7zcam webcam`
 publishes a normal webcam, `/dev/video20` (YUYV, 1920x1080 at 30 fps by default), through the `v4l2loopback` module:

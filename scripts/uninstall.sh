@@ -20,3 +20,5 @@ rm -rf /opt/a7zcam; rm -f /usr/local/bin/a7zcam
 depmod -a
 udevadm control --reload || true
 echo "done - reboot to unload the modules"
+
+for n in still vid hello; do for pfx in rpicam libcamera; do [ "$(readlink /usr/local/bin/$pfx-$n 2>/dev/null)" = /opt/a7zcam/rpicam.py ] && rm -f /usr/local/bin/$pfx-$n; done; done
