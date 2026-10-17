@@ -223,22 +223,57 @@ class Camera:
                 vals.append(self.sharpness(a))
         return float(np.mean(vals)) if vals else 0.0
 
-    def _af(self):
+    def _af(self, coarse=192, fine_step=48, contrast_ratio=0.75, max_coarse_steps=10):
+        """
+        Full-range contrast-detect AF. Search strategy ported (in spirit - this hardware has no
+        phase-detect data to fall back on) from Raspberry Pi's own libcamera IPA CDAF
+        (src/ipa/rpi/controller/rpi/af.cpp): start from the CURRENT lens position, step in one
+        direction, and stop as soon as contrast has clearly peaked and started dropping instead of
+        always scanning the whole range; reverse once if the first step away was no better. A short
+        fine scan then refines around the best position found.
+        """
         self.af_state = "running"; self.af_log = []
         try:
-            was_ae = self.ae
-            res = []
-            for pos in range(0, 4096, 256):
-                res.append((pos, self._measure(pos))); self.af_log = res[:]
-            best = max(res, key=lambda r: r[1])[0]
-            fine = []
-            for pos in range(max(0, best - 320), min(4095, best + 320) + 1, 64):
-                fine.append((pos, self._measure(pos)))
-            best = max(fine, key=lambda r: r[1])
-            self.af_log = res + fine
-            self.focus = best[0]; self.lens.set(self.focus)
-            self.sharp = best[1]
-            self.af_state = "done (position %d, sharpness %.2f)" % best
+            full_log = []
+
+            def measure(pos):
+                v = self._measure(pos)
+                full_log.append((pos, v)); self.af_log = full_log[:]
+                return v
+
+            start = self.focus
+            start_val = measure(start)
+
+            def scan_direction(step):
+                pos, best_pos, best_val = start, start, start_val
+                for _ in range(max_coarse_steps):
+                    pos = pos + step
+                    if pos < 0 or pos > 4095:
+                        break
+                    val = measure(pos)
+                    if val > best_val:
+                        best_val, best_pos = val, pos
+                    if val < contrast_ratio * best_val:
+                        break
+                return best_pos, best_val
+
+            best_pos, best_val = scan_direction(-coarse)
+            if best_val <= start_val * 1.02:
+                best_pos, best_val = scan_direction(coarse)
+
+            for p in range(max(0, best_pos - 2 * fine_step), min(4095, best_pos + 2 * fine_step) + 1, fine_step):
+                if p == best_pos:
+                    continue
+                val = measure(p)
+                if val > best_val:
+                    best_val, best_pos = val, p
+
+            self.focus = best_pos; self.lens.set(self.focus)
+            self.sharp = best_val
+            self.caf_ref = best_val; self.caf_bad = 0     # keep continuous AF's own reference in sync:
+            # without this, the next caf_loop check compares against a stale value from before this
+            # sweep and can immediately decide (wrongly) that the scene still needs refocusing.
+            self.af_state = "done (position %d, sharpness %.2f)" % (best_pos, best_val)
         except Exception as e:                       # never leave the lens in a random place silently
             self.af_state = f"failed: {e}"
             self.lens.set(self.focus)

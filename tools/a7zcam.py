@@ -290,16 +290,60 @@ class Camera:
             vals.append(self.sharpness(a))
         return float(np.mean(vals))
 
-    def autofocus(self, coarse=256, fine=64, log=None):
-        """Contrast-detect AF: coarse sweep of the whole range, then a fine sweep around the peak."""
-        res = [(p, self._measure(p)) for p in range(0, 4096, coarse)]
-        best = max(res, key=lambda r: r[1])[0]
-        res2 = [(p, self._measure(p)) for p in range(max(0, int(best - 1.25 * coarse)), min(4095, int(best + 1.25 * coarse)) + 1, fine)]
-        best = max(res2, key=lambda r: r[1])
-        self.set_focus(best[0])
+    def autofocus(self, coarse=192, fine=48, contrast_ratio=0.75, max_coarse_steps=10, log=None):
+        """
+        Contrast-detect AF. Search strategy ported (in spirit - this hardware has no phase-detect
+        data to fall back on, unlike the Pi) from how Raspberry Pi's own libcamera IPA does CDAF
+        (src/ipa/rpi/controller/rpi/af.cpp, startProgrammedScan/doScan): start from the CURRENT lens
+        position instead of always from one end of the range, step in one direction, and stop as soon
+        as contrast has clearly peaked and started dropping (contrast_ratio of the best seen) instead
+        of always scanning the full range. If the first step away is no better, the search direction
+        was wrong, so it reverses and scans the other way from the original start. A short fine scan
+        then refines around whichever position scored best. This needs far fewer lens moves than a
+        brute-force full sweep for the common case of a small scene change, so it is both faster and
+        quieter.
+        """
+        full_log = []
+
+        def measure(pos):
+            v = self._measure(pos)
+            full_log.append((pos, v))
+            return v
+
+        start = self.pos
+        start_val = measure(start)
+
+        def scan_direction(step):
+            pos, best_pos, best_val = start, start, start_val
+            took_a_step = False
+            for _ in range(max_coarse_steps):
+                pos = pos + step
+                if pos < 0 or pos > 4095:
+                    break
+                val = measure(pos)
+                took_a_step = True
+                if val > best_val:
+                    best_val, best_pos = val, pos
+                if val < contrast_ratio * best_val:
+                    break
+            return best_pos, best_val, took_a_step
+
+        best_pos, best_val, _ = scan_direction(-coarse)
+        if best_val <= start_val * 1.02:
+            # the first direction tried was no better than the start: wrong way, try the other side
+            best_pos, best_val, _ = scan_direction(coarse)
+
+        for p in range(max(0, best_pos - 2 * fine), min(4095, best_pos + 2 * fine) + 1, fine):
+            if p == best_pos:
+                continue
+            val = measure(p)
+            if val > best_val:
+                best_val, best_pos = val, p
+
+        self.set_focus(best_pos)
         if log is not None:
-            log.extend(res + res2)
-        return best
+            log.extend(full_log)
+        return best_pos, best_val
 
 
 # ---------------------------------------------------------------------------------------- DNG writer
