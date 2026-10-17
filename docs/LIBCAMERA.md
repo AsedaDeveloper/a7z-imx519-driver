@@ -54,6 +54,14 @@ lc-a7z gst-launch-1.0 -e libcamerasrc ! video/x-raw,format=RGBA,width=1916,heigh
   SoC, not a correctness bug in the driver or the exposure/gain controls. A real fix is ISP performance work (SIMD
   demosaic, multiple worker threads) rather than a small patch; not attempted here. Auto-exposure mode is governed by
   the same mechanism and is not meaningfully different.
+* **A multi-threaded fix was tried and reverted.** It measurably improved the average frame cost (~32 ms to ~24 ms)
+  and showed the real speedup (occasional 20.4 ms, zero-skip frames); an initial round of testing (66 runs, 36 of
+  them under ThreadSanitizer) found no problems, so it was merged and briefly tagged in `v0.2.0-beta`. A later,
+  larger re-test (40+ runs) found it crashes about 40 % of the time with a real, reproducible `SIGSEGV` in
+  `DebayerCpu::setupInputMemcpyMt()`. The root cause was not found before the crash rate was discovered, so the
+  change was reverted rather than left in a release. The lesson: a double-digit run count is not enough to clear an
+  intermittent-crash bar for code like this; if this is retried, it needs a much larger, automated soak test (several
+  hundred runs) before being trusted, not a few dozen manual ones.
 * **Fixed (previously crashed on camera stop/restart):** a second `start()`/`stop()` cycle in the same process used to
   abort or crash the kernel. Root causes: `IPASoftSimple::processStats` read sensor controls unconditionally even when
   none were available yet after a reset; `SimpleCameraData::imageBufferReady`/`conversionOutputDone` dereferenced a
