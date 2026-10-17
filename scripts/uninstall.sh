@@ -15,10 +15,9 @@ echo "removing the device-tree overlay"
 rm -f /boot/dtbo/cubie-a7z-imx519-j5.dtbo
 command -v u-boot-update >/dev/null && u-boot-update >/dev/null 2>&1 || true
 echo "removing tools"
+for n in still vid hello; do for pfx in rpicam libcamera; do [ "$(readlink "/usr/local/bin/$pfx-$n" 2>/dev/null)" = /opt/a7zcam/rpicam.py ] && rm -f "/usr/local/bin/$pfx-$n"; done; done
 rm -rf /opt/a7zcam; rm -f /usr/local/bin/a7zcam
 [ "$KEEP" = 1 ] || rm -rf /opt/a7z-imx519-driver
 depmod -a
 udevadm control --reload || true
 echo "done - reboot to unload the modules"
-
-for n in still vid hello; do for pfx in rpicam libcamera; do [ "$(readlink /usr/local/bin/$pfx-$n 2>/dev/null)" = /opt/a7zcam/rpicam.py ] && rm -f /usr/local/bin/$pfx-$n; done; done
