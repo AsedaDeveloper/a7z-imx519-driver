@@ -42,27 +42,18 @@ lc-a7z gst-launch-1.0 -e libcamerasrc ! video/x-raw,format=RGBA,width=1916,heigh
 * **Controls:** the patched soft IPA now also exposes `AeEnable`, `ExposureTime` (microseconds) and `AnalogueGain`, verified
   from Python (`cam.create_request().set_control(...)`); the values are read back correctly in the request metadata.
   Autofocus (`LensPosition`, `AfMode`) is still not available through libcamera; use `a7zcam` / V4L2 for that.
-* **Frame rate: partially fixed (multi-threaded demosaic), still not fully caught up.** Root cause (measured directly
-  with a temporary per-call timer): the single-threaded demosaic + colour-matrix + gamma pipeline cost 26-39 us/frame
-  at 1080p (average ~32 ms), more than the sensor's own 20.45 ms frame time, so the VIN had to skip frames to let the
-  software catch up - always at least 2x (41 ms) or worse. **Fix applied:** the demosaic now splits the image into a
-  band per CPU core and runs the bands concurrently (`DebayerCpu::process2Threaded()` in `debayer_cpu.cpp`); measured
-  cost dropped to about 16-30 ms/frame (average ~24 ms), and some runs now hit the sensor's true native rate exactly
-  (20.4 ms/frame, zero skipped frames) - something the single-threaded path could never do. It is not yet consistent:
-  other runs still show 2x (41 ms) because creating and joining a fresh set of threads every single frame has real,
-  variable OS overhead on this hardware, which sometimes eats the whole gain. A persistent thread pool (threads
-  created once, reused every frame) would likely make the full-rate result consistent instead of occasional; not
-  attempted here - safe to extend by someone with time for careful testing (see validation notes below). Stats
-  (`SwStatsCpu::processLine0`) are shared across all bands through one mutex, so AE/AWB accuracy is unaffected.
-  Auto-exposure mode uses the same mechanism and is not meaningfully different.
-* **How this was validated before being trusted:** an intermittent crash during initial development (about 1 in 20
-  runs) was taken seriously rather than patched over blind. It was re-tested under ThreadSanitizer (ARM64,
-  preload `libtsan.so.2` before Python - needed to avoid a static-TLS loader error) across 36 runs (~900 threaded
-  demosaic calls): zero races involving the new code (the only race TSan found is pre-existing in libcamera's own
-  `Camera::acquire()`/`Semaphore` shutdown path, unrelated). The production build was then run 30 more times (25
-  frames each, 750 more calls): zero crashes. Regression-tested against the standard V4L2/`a7zcam` paths (still,
-  video, 20-cycle open/close soak) with no change in behaviour, since this only touches the libcamera software-ISP
-  code path.
+* **Known limitation: effective frame rate is lower than the sensor's, and varies between runs (root-caused).**
+  The sensor driver and the exposure/gain math are exact: a 20 ms request writes exactly 1416 lines (20.00 ms at
+  1080p's line time). What varies is the *delivered* frame period, and it is always a small-integer multiple of that
+  true per-frame time (2x = 40.9 ms, 5x = 102.2 ms measured repeatedly), steady within one run but different between
+  runs. Cause: the software ISP's demosaic + colour-matrix + gamma pipeline is single-threaded and, at 1080p, costs
+  close to the sensor's own frame time to run (measured ~90 % of one CPU core while capturing); the VIN's buffer
+  queue then has to skip frames to let the (slower) software consumer catch up, and exactly how many frames get
+  skipped depends on buffer/scheduling state at stream start - hence consistent within a run, different between
+  runs. This is a **performance** limitation of the unaccelerated (no NEON, single-threaded) software ISP on this
+  SoC, not a correctness bug in the driver or the exposure/gain controls. A real fix is ISP performance work (SIMD
+  demosaic, multiple worker threads) rather than a small patch; not attempted here. Auto-exposure mode is governed by
+  the same mechanism and is not meaningfully different.
 * **Fixed (previously crashed on camera stop/restart):** a second `start()`/`stop()` cycle in the same process used to
   abort or crash the kernel. Root causes: `IPASoftSimple::processStats` read sensor controls unconditionally even when
   none were available yet after a reset; `SimpleCameraData::imageBufferReady`/`conversionOutputDone` dereferenced a
