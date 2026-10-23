@@ -1,0 +1,16 @@
+--- a/drivers/vin/modules/actuator/actuator.c
++++ b/drivers/vin/modules/actuator/actuator.c
+@@ -141,10 +141,11 @@
+ 		    act_ctrl->func_tbl.actuator_move_pos(act_ctrl,
+ 							 ctrlstep->step,
+ 							 ctrlstep->dir);
+-		ret = -EINVAL;
++		break;
+ 	}
+ 	default:
+-		return -EINVAL;
++		ret = -EINVAL;
++		break;
+ 	}
+ 
+ 	mutex_unlock(act_ctrl->actuator_mutex);

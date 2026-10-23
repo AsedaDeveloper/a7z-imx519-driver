@@ -1,0 +1,149 @@
+# Experimental: Allwinner hardware ISP (ISP602) path for the IMX519
+
+> **Status: experimental, tested on one board / one sensor module / one lens.** Nothing here replaces the main (raw-path)
+> driver. It is a research branch of work that gets real, colour-processed frames out of the A733's *hardware* ISP.
+
+The main driver in this repo gives you raw Bayer and does the processing on the CPU. This folder shows how to push the sensor
+through Radxa's vendor `vin` stack and Allwinner's closed-source ISP library (`libAWIspApi` / `libisp`) instead.
+
+## What works
+
+| | |
+|---|---|
+| Hardware-ISP frames (YUV420) | yes, 1920x1080 and 2328x1748 at 30 fps, **3264x2448 at ~13 fps** |
+| **Full 16 MP through the ISP** | **yes, 4656x3496 at 9.4 fps (`A7Z_FPS=9`) or 15 fps (`A7Z_FPS=15`)**, and 3840x2160 at 18 fps, using the vendor 2-in-1 mode, see below (and [What was tested](#what-was-tested-and-what-that-does-not-show)) |
+| Colour | white balance, CCM and black level tuned against a displayed 24-patch chart (see `tuning/`) |
+| Autofocus | own userspace contrast-detect AF in `a7zcap` (libisp's own AF never focuses on this module) |
+| Lens driver | `ak7375_act.c` + a fix for a mutex that Radxa's `actuator.c` never releases (hangs the process in D state) |
+
+## What does not work (yet)
+
+* The 2-in-1 capture tool (`a7zdual`) is a separate program from `a7zcap`: it has no autofocus loop and no `A7Z_FLAT`. Folding it into `a7zcap` is not done.
+* No seam handling has been needed so far, but only a handful of scenes were checked; look for a join at the middle column on yours.
+* **Software flat-field (`A7Z_FLAT`) is off and ships no map.** Applying a gain map to the final 8-bit image clips highlights (27%
+  of a bright test frame). A correct fix belongs in the ISP's own lens-shading stage on raw data.
+* Colour tuning is specific to one module/lens/screen. Treat `tuning_v4.json` as an example, not a calibration for your camera.
+
+## Why the sensor was stuck at 2328x1748 (the useful finding)
+
+`sensor_find_frame_size()` in the BSP first keeps only the modes whose `fps_fixed` equals the frame rate requested through
+`S_PARM`, then picks among those. Demo programs ask for 30 fps, so only the 30 fps mode is ever eligible, and other resolutions are
+produced by the VIPP scaler from it. Select a mode by asking for **its** frame rate: `A7Z_FPS=13 a7zcap 3264 2448 ...`.
+(9 = 4656x3496, 13 = 3264x2448, 18 = 3840x2160, 30 = 2328x1748, 60 = 1920x1080.)
+
+## Full 16 MP: the 2-in-1 mode
+
+The single ISP is limited to 3264 pixels per line (`vin_os.c: max_width = 3264`; `sunxi_isp.c` clamps the format to 3264 unless
+`large_image == 3`). Wider modes use the vendor "2-in-1" mode: the CSI parser splits one sensor stream into two overlapping halves,
+one per ISP, and both DMAs write into one buffer. **No kernel change is needed**, but three things must all be right
+(`userspace/a7zdual.c`):
+
+1. `SET_DMA_MERGE = 1` and open **only `/dev/video1`**. The driver forwards `S_INPUT`/`S_FMT`/`S_PARM` to `video0` itself (forcing
+   `large_image = 3`) and streams both pipelines. Opening both nodes yourself makes them fight over the media links (`sunxi_csi.1
+   setup link sunxi_tdm_rx.0 fail!`, because the media core refuses to change a link while its CSI is streaming).
+2. Request the sensor mode's own frame rate through `S_PARM` (see the table above).
+3. Call libisp's `ispSetIspLargeImage(id)` on **both** ISP instances before `ispStart`. The demo path never calls it. Without it the
+   pipeline delivers one or two frames and then stalls with `tdm0 rx0 buffer full`, at every size.
+
+```sh
+A7Z_MERGE=1 A7Z_FPS=15 ./a7zdual 4656 3496 20 /tmp/cap/full    # full 16 MP, 15 fps (A7Z_FPS=9: 9.4 fps, stock clocks)
+```
+
+### Going faster than 9.4 fps at 16 MP
+
+The stock full-res mode runs the sensor at 816 Mbit/s per lane (9.44 fps). `A7Z_FPS=15` selects a second full-res mode whose clocks
+are module parameters (`/sys/module/imx519_mipi/parameters/fast_{ivt,iop,hts,vts}`, read at every stream start; try new values
+with `tools/sweep_fps.sh`). The defaults give **15.06 fps at 1296 Mbit/s per lane**; see [What was tested](#what-was-tested-and-what-that-does-not-show) for exactly what that claim rests on.
+What limits it, measured on one module and one 15-pin cable:
+
+| lane rate | fps | picture |
+|---|---|---|
+| 1224 Mbit/s | 14.2 | clean |
+| 1296 Mbit/s | 15.06 | clean (default) |
+| 1344 Mbit/s | 15.6 | clean |
+| 1368 Mbit/s | 15.9 | first damaged pixels (0.01%) |
+| 1392 Mbit/s | 15.1 | visible magenta ring (0.77%) |
+| 1500 Mbit/s | 16.6 | badly damaged (13.7%) |
+| 1560 Mbit/s and up | no frames at all | |
+
+* **The link, not the ISP, is the limit.** The module has two lanes. A frame carries ~81 Mbit per lane, so ~1.35 Gbit/s gives ~16 fps at best.
+* **Frames keep arriving while the picture is damaged.** Counting frames or watching the kernel log tells you nothing; score the image with
+  `tools/corruption_check.py`. The errors are data dependent (they show up at certain brightness values), so a flat test patch can pass
+  while a gradient fails. Only a bright indoor scene was tested for the defaults; a longer or different-scene soak would be wise before
+  trusting them on another module or a longer cable.
+* The IVT multiplier saturates at 511 (681 MHz pixel clock), and a frame length below 3572 stops the stream.
+
+### What was tested, and what that does not show
+
+| run | what was captured | what was checked |
+|---|---|---|
+| 16 MP at the defaults (`A7Z_FPS=15`) | one run of 300 frames, one bright, mostly smooth indoor scene | 300 frames delivered, 0 `buffer full` and 0 `frame lost` kernel messages, 15.06 fps measured over frames 5..300. **Only the 300th frame was scored** with `tools/corruption_check.py`: 0.0000% magenta, largest row-brightness jump 1.6 |
+| 3840x2160 (`A7Z_FPS=18`, stock clocks) | one run of 60 frames, the same kind of scene | 60 frames delivered, 0 `buffer full`, 18.02 fps measured. **Only the 60th frame was scored**, with the same formula adapted to that frame size (the script in `tools/` handles the 4656x3496 layout only): 0.0000% magenta, row jump 1.3 |
+| 16 MP at the defaults, a different scene | three 30-frame runs of a bottle scene (real pink/red label graphics in view) | last frame of each scored: 0.20-0.26% magenta, but only 5-8% of those pixels are in sparse neighbourhoods and the mask shows compact blobs on the label; the picture shows no ring, stripes or banding. This is real magenta content, not damage, **but a frame that contains real magenta cannot rule out a few hundred speckle pixels** |
+
+These checks are **limited to those scenes and those frames. They do not prove that every frame is free of errors.**
+
+* One frame per run was scored, not all of them. A rare, brief link error in another frame would not be seen.
+* Link errors depend on the pixel data, and the checker only looks for two symptoms (magenta speckle and row-brightness jumps). Other
+  patterns (very dark or fully saturated scenes, fine high-contrast detail, other colours) were not tested, and damage that does not
+  produce those symptoms would pass.
+* One module, one cable, one session, no long-duration or temperature test.
+* The default (1296 Mbit/s) sits about 4% below the highest rate that scored clean (1344) and about 5% below where damage was first
+  seen (1368). That is a small margin. Treat the default as a starting point: on your hardware, sweep with `tools/sweep_fps.sh`,
+  score several different scenes, and drop `fast_iop` if anything looks wrong.
+* `tools/corruption_check.py` is a heuristic, not a verdict. A real pink or magenta object scores above zero too, which is why it also reports
+  `sparse_share`: about 98-100% for the damage seen at 1368 and 1392 Mbit/s (399 and 31282 scattered pixels), 5-8% for real objects. Heavy damage can be
+  dense instead (the 1500 Mbit/s frame: 13.7% magenta in a solid ring, sparse_share 10%; a second 1500 Mbit/s capture, with a shorter line length, had
+  row-brightness jumps of 165 and horizontal bands of garbage), so the tool also flags large magenta areas and large row jumps.
+  Judge a non-zero score by looking at the picture. The cleanest evidence for the default is the 300-frame run, whose scored frame had zero
+  magenta pixels.
+
+The output file is raw planar 4:2:0 with **padded plane heights** (3504 luma rows for 3496), exactly as `bytesused` reports; decode it
+with the padded sizes or the chroma planes come out misaligned.
+
+## Layout
+
+```
+userspace/a7zcap.c      capture through libAWIspApi (single node, up to 3264); env: A7Z_FPS A7Z_AF A7Z_FOCUS A7Z_SWEEP A7Z_EVERY A7Z_STDOUT A7Z_FLAT
+userspace/a7zdual.c     2-in-1 capture for widths above 3264, up to the full 4656x3496 (see below)
+userspace/liveview.sh   live view over ssh + ffplay
+kernel/imx519_mipi.c    sensor driver for the vendor vin framework (adds the 3264x2448 centre-crop mode)
+kernel/ak7375_act.c     AK7375 focus actuator
+kernel/actuator-mutex-fix.patch   fix for the vendor actuator.c
+overlay/imx519-j5-isp.dts         device-tree overlay for ISP mode
+tuning/                 build a libisp parameter file from YOUR OWN library (see below)
+tools/                  chart scorer, (experimental) flat-field map builder, fps sweep + link-corruption checker
+```
+
+## You need your own copy of the Allwinner library
+
+`libAWIspApi`, `libisp`, `libisp_ini` and the default tuning data are closed source and **are not in this repo**. They come with
+Radxa's image (package `libawispapi-isp-602-arm64`). `tuning/extract_isp_defaults.py` reads the default parameter struct straight
+out of your installed `libisp_ini.so`; `tuning/mkparam.py` patches it:
+
+```sh
+tuning/extract_isp_defaults.py /usr/lib/aarch64-linux-gnu/libisp_ini.so defaults.bin
+tuning/mkparam.py defaults.bin isp_param_config.bin tuning/tuning_v4.json
+A7Z_HOST=radxa@board tuning/deploy_param.sh isp_param_config.bin     # -> /mnt/isp_param_config.bin
+```
+
+## Build and run (on the board)
+
+```sh
+# userspace (needs libc6-dev and the vendor headers sunxi_camera_v2.h / AWIspApi.h from the BSP)
+gcc -O2 -o a7zcap userspace/a7zcap.c -Wl,--no-as-needed -Wl,--export-dynamic \
+    -lAWIspApi -lisp -lm -lpthread -ldl -Wl,--allow-shlib-undefined
+A7Z_AF=1 A7Z_EVERY=10 ./a7zcap 1920 1080 100 /tmp/cap/shot            # autofocus + frames
+A7Z_FPS=13 A7Z_FOCUS=1830 ./a7zcap 3264 2448 12 /tmp/cap/big           # 8 MP
+# a7zdual builds with the same gcc line (replace a7zcap.c / a7zcap)
+```
+
+`--export-dynamic` is required: `a7zcap` exports its own `ioctl()` so it can swallow libisp's lens commands while it runs its own
+autofocus. Kernel modules are built out of tree against the Radxa BSP (`github.com/radxa/allwinner-bsp`, tag `cubie-aiot-v1.4.6`,
+`drivers/vin`); apply `kernel/actuator-mutex-fix.patch` to the BSP `actuator.c` first. Boot with the ISP overlay (not the bypass
+overlay from the main driver). YUV frames are written as raw planar 4:2:0 with 1088 padded luma rows at 1080p.
+
+## Licence
+
+GPL-2.0-or-later, like the rest of the repo. The kernel files derive from Allwinner/Radxa BSP sources (GPL) and the Raspberry Pi
+IMX519 driver; see their headers.
