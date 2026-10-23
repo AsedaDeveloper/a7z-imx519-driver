@@ -11,7 +11,7 @@ through Radxa's vendor `vin` stack and Allwinner's closed-source ISP library (`l
 | | |
 |---|---|
 | Hardware-ISP frames (YUV420) | yes, 1920x1080 and 2328x1748 at 30 fps, **3264x2448 at ~13 fps** |
-| **Full 16 MP through the ISP** | **yes, 4656x3496 at 9.4 fps (`A7Z_FPS=9`) or 15 fps (`A7Z_FPS=15`)**, and 3840x2160 at 18 fps (picture checked clean), using the vendor 2-in-1 mode, see below |
+| **Full 16 MP through the ISP** | **yes, 4656x3496 at 9.4 fps (`A7Z_FPS=9`) or 15 fps (`A7Z_FPS=15`)**, and 3840x2160 at 18 fps, using the vendor 2-in-1 mode, see below (and [What was tested](#what-was-tested-and-what-that-does-not-show)) |
 | Colour | white balance, CCM and black level tuned against a displayed 24-patch chart (see `tuning/`) |
 | Autofocus | own userspace contrast-detect AF in `a7zcap` (libisp's own AF never focuses on this module) |
 | Lens driver | `ak7375_act.c` + a fix for a mutex that Radxa's `actuator.c` never releases (hangs the process in D state) |
@@ -53,7 +53,7 @@ A7Z_MERGE=1 A7Z_FPS=15 ./a7zdual 4656 3496 20 /tmp/cap/full    # full 16 MP, 15 
 
 The stock full-res mode runs the sensor at 816 Mbit/s per lane (9.44 fps). `A7Z_FPS=15` selects a second full-res mode whose clocks
 are module parameters (`/sys/module/imx519_mipi/parameters/fast_{ivt,iop,hts,vts}`, read at every stream start; try new values
-with `tools/sweep_fps.sh`). The defaults give **15.06 fps at 1296 Mbit/s per lane**: 300 consecutive frames, no drops, no link damage.
+with `tools/sweep_fps.sh`). The defaults give **15.06 fps at 1296 Mbit/s per lane**; see [What was tested](#what-was-tested-and-what-that-does-not-show) for exactly what that claim rests on.
 What limits it, measured on one module and one 15-pin cable:
 
 | lane rate | fps | picture |
@@ -72,6 +72,31 @@ What limits it, measured on one module and one 15-pin cable:
   while a gradient fails. Only a bright indoor scene was tested for the defaults; a longer or different-scene soak would be wise before
   trusting them on another module or a longer cable.
 * The IVT multiplier saturates at 511 (681 MHz pixel clock), and a frame length below 3572 stops the stream.
+
+### What was tested, and what that does not show
+
+| run | what was captured | what was checked |
+|---|---|---|
+| 16 MP at the defaults (`A7Z_FPS=15`) | one run of 300 frames, one bright, mostly smooth indoor scene | 300 frames delivered, 0 `buffer full` and 0 `frame lost` kernel messages, 15.06 fps measured over frames 5..300. **Only the 300th frame was scored** with `tools/corruption_check.py`: 0.0000% magenta, largest row-brightness jump 1.6 |
+| 3840x2160 (`A7Z_FPS=18`, stock clocks) | one run of 60 frames, the same kind of scene | 60 frames delivered, 0 `buffer full`, 18.02 fps measured. **Only the 60th frame was scored**, with the same formula adapted to that frame size (the script in `tools/` handles the 4656x3496 layout only): 0.0000% magenta, row jump 1.3 |
+| 16 MP at the defaults, a different scene | three 30-frame runs of a bottle scene (real pink/red label graphics in view) | last frame of each scored: 0.20-0.26% magenta, but only 5-8% of those pixels are in sparse neighbourhoods and the mask shows compact blobs on the label; the picture shows no ring, stripes or banding. This is real magenta content, not damage, **but a frame that contains real magenta cannot rule out a few hundred speckle pixels** |
+
+These checks are **limited to those scenes and those frames. They do not prove that every frame is free of errors.**
+
+* One frame per run was scored, not all of them. A rare, brief link error in another frame would not be seen.
+* Link errors depend on the pixel data, and the checker only looks for two symptoms (magenta speckle and row-brightness jumps). Other
+  patterns (very dark or fully saturated scenes, fine high-contrast detail, other colours) were not tested, and damage that does not
+  produce those symptoms would pass.
+* One module, one cable, one session, no long-duration or temperature test.
+* The default (1296 Mbit/s) sits about 4% below the highest rate that scored clean (1344) and about 5% below where damage was first
+  seen (1368). That is a small margin. Treat the default as a starting point: on your hardware, sweep with `tools/sweep_fps.sh`,
+  score several different scenes, and drop `fast_iop` if anything looks wrong.
+* `tools/corruption_check.py` is a heuristic, not a verdict. A real pink or magenta object scores above zero too, which is why it also reports
+  `sparse_share`: about 98-100% for the damage seen at 1368 and 1392 Mbit/s (399 and 31282 scattered pixels), 5-8% for real objects. Heavy damage can be
+  dense instead (the 1500 Mbit/s frame: 13.7% magenta in a solid ring, sparse_share 10%; a second 1500 Mbit/s capture, with a shorter line length, had
+  row-brightness jumps of 165 and horizontal bands of garbage), so the tool also flags large magenta areas and large row jumps.
+  Judge a non-zero score by looking at the picture. The cleanest evidence for the default is the 300-frame run, whose scored frame had zero
+  magenta pixels.
 
 The output file is raw planar 4:2:0 with **padded plane heights** (3504 luma rows for 3496), exactly as `bytesused` reports; decode it
 with the padded sizes or the chroma planes come out misaligned.
