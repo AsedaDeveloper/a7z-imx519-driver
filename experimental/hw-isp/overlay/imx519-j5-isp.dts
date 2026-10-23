@@ -1,0 +1,299 @@
+/dts-v1/;
+
+/ {
+
+	metadata {
+		title = "IMX519 on J5 (A7A-style csi1/mipi1, TWI3, PE8/PE9, MCLK1)";
+		compatible = "radxa,cubie-a7a", "radxa,cubie-a7z", "radxa,cubie-a7s";
+		category = "camera";
+		exclusive = "vind0", "csi0", "PE8", "PE9", "PE3", "PE4";
+		description = "IMX519 on J5 with the Allwinner hardware ISP path (experimental).";
+	};
+
+	fragment@0 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			csi_top = <0x29f63000>;
+			csi_isp = <0x29f63000>;
+			vind_mclkpin-supply = <0xffffffff>;
+			vind_mclkpin_vol = <0x1b7740>;
+			vind_mcsipin-supply = <0xffffffff>;
+			vind_mcsipin_vol = <0x1b7740>;
+			vind_mipipin-supply = <0xffffffff>;
+			vind_mipipin_vol = <0x1b7740>;
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+			pinctrl-0;
+			pinctrl-1;
+		};
+	};
+
+	fragment@2 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+			pinctrl-0;
+			pinctrl-1;
+		};
+	};
+
+	fragment@3 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@4 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@5 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@6 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@7 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@8 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@9 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@10 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@11 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@12 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			sensor0_mname = "imx519_mipi";
+			sensor0_twi_addr = <0x34>;
+			sensor0_twi_cci_id = <0x03>;
+			sensor0_mclk_id = <0x01>;
+			sensor0_pos = "rear";
+			sensor0_isp_used = <0x01>;
+			sensor0_fmt = <0x01>;
+			sensor0_stby_mode = <0x00>;
+			sensor0_vflip = <0x00>;
+			sensor0_hflip = <0x00>;
+			sensor0_reset = <0xffffffff 0x04 0x09 0x01>;
+			sensor0_pwdn = <0xffffffff 0x04 0x08 0x00>;
+			status = "okay";
+		};
+	};
+
+	fragment@13 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			vinc0_csi_sel = <0x01>;
+			vinc0_mipi_sel = <0x01>;
+			vinc0_isp_sel = <0x00>;
+			vinc0_isp_tx_ch = <0x00>;
+			vinc0_tdm_rx_sel = <0x00>;
+			vinc0_rear_sensor_sel = <0x00>;
+			vinc0_front_sensor_sel = <0x00>;
+			vinc0_sensor_list = <0x00>;
+			device_id = <0x00>;
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@14 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			vinc1_csi_sel = <0x01>;
+			vinc1_mipi_sel = <0x01>;
+			vinc1_isp_sel = <0x01>;
+			vinc1_isp_tx_ch = <0x00>;
+			vinc1_tdm_rx_sel = <0x01>;
+			vinc1_rear_sensor_sel = <0x00>;
+			vinc1_front_sensor_sel = <0x00>;
+			vinc1_sensor_list = <0x00>;
+			device_id = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@15 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			vinc4_csi_sel = <0x01>;
+			vinc4_mipi_sel = <0x01>;
+			vinc4_isp_sel = <0x00>;
+			vinc4_isp_tx_ch = <0x00>;
+			vinc4_tdm_rx_sel = <0x00>;
+			vinc4_rear_sensor_sel = <0x00>;
+			vinc4_front_sensor_sel = <0x00>;
+			vinc4_sensor_list = <0x00>;
+			device_id = <0x04>;
+			work_mode = <0x01>;
+			status = "okay";
+		};
+	};
+
+	fragment@16 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			vinc5_csi_sel = <0x01>;
+			vinc5_mipi_sel = <0x01>;
+			vinc5_isp_sel = <0x01>;
+			vinc5_isp_tx_ch = <0x00>;
+			vinc5_tdm_rx_sel = <0x01>;
+			vinc5_rear_sensor_sel = <0x00>;
+			vinc5_front_sensor_sel = <0x00>;
+			vinc5_sensor_list = <0x00>;
+			device_id = <0x05>;
+			status = "okay";
+		};
+	};
+
+	fragment@17 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			clock-frequency = <0x186a0>;
+			pinctrl-0 = <0x01>;
+			pinctrl-1 = <0x02>;
+			pinctrl-names = "default", "sleep";
+			twi_drv_used = <0x01>;
+			no_suspend = <0x01>;
+			twi-supply = <0xffffffff>;
+			status = "okay";
+		};
+	};
+
+	fragment@18 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+
+			twi3@0 {
+				pins = "PE3", "PE4";
+				function = "twi3";
+				drive-strength = <0x0a>;
+				bias-pull-up;
+				phandle = <0x01>;
+			};
+
+			twi3@1 {
+				pins = "PE3", "PE4";
+				function = "gpio_in";
+				phandle = <0x02>;
+			};
+		};
+	};
+
+	fragment@19 {
+		target = <0xffffffff>;
+
+		__overlay__ {
+			status = "okay";
+			actuator0_name = "ak7375_act";
+			actuator0_slave = <0x18>;
+			actuator0_afvdd = "";
+			actuator0_afvdd_vol = <0x00>;
+		};
+	};
+
+	__fixups__ {
+		vind0 = "/fragment@0:target:0";
+		actuator0 = "/fragment@19:target:0";
+		reg_bldo1 = "/fragment@0/__overlay__:vind_mclkpin-supply:0", "/fragment@0/__overlay__:vind_mcsipin-supply:0", "/fragment@0/__overlay__:vind_mipipin-supply:0", "/fragment@17/__overlay__:twi-supply:0";
+		csi1 = "/fragment@1:target:0";
+		mipi1 = "/fragment@2:target:0";
+		tdm0 = "/fragment@3:target:0";
+		isp00 = "/fragment@4:target:0";
+		isp01 = "/fragment@5:target:0";
+		scaler00 = "/fragment@6:target:0";
+		scaler01 = "/fragment@7:target:0";
+		scaler10 = "/fragment@8:target:0";
+		scaler11 = "/fragment@9:target:0";
+		scaler20 = "/fragment@10:target:0";
+		scaler30 = "/fragment@11:target:0";
+		sensor0 = "/fragment@12:target:0";
+		pio = "/fragment@12/__overlay__:sensor0_reset:0", "/fragment@12/__overlay__:sensor0_pwdn:0", "/fragment@18:target:0";
+		vinc00 = "/fragment@13:target:0";
+		vinc01 = "/fragment@14:target:0";
+		vinc10 = "/fragment@15:target:0";
+		vinc11 = "/fragment@16:target:0";
+		twi3 = "/fragment@17:target:0";
+	};
+
+	__local_fixups__ {
+
+		fragment@17 {
+
+			__overlay__ {
+				pinctrl-0 = <0x00>;
+				pinctrl-1 = <0x00>;
+			};
+		};
+	};
+};

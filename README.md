@@ -8,6 +8,7 @@ Linux driver, device-tree overlay and tools for the **Sony IMX519 16 MP autofocu
 > view, and has survived stress tests. It is **not** a drop-in replacement for the Raspberry Pi camera stack:
 > there is no hardware ISP (processing is done on the CPU); libcamera support is new and limited. See [What works](#what-works) and
 > [Known limitations](#known-limitations) before you build on it.
+> A separate, experimental path through the SoC's hardware ISP lives in [`experimental/hw-isp/`](experimental/hw-isp/README.md).
 
 Raspberry Pi OS supports this module out of the box. The Allwinner A733 does not: Radxa ships no IMX519 driver, the
 SoC's camera framework (VIN) differs completely from V4L2/libcamera on the Pi, and the board's camera connector
