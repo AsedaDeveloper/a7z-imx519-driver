@@ -66,8 +66,9 @@ MODULE_PARM_DESC(term_res, "enable the 100ohm MIPI termination (1) or not (0)");
  * Tunable full-resolution mode (select it with frame rate 15, i.e. A7Z_FPS=15): the same register set as the 9 fps full mode, but the
  * PLL multipliers, line length and frame length come from these parameters at every stream start, so the speed can be tuned
  * from a shell without rebuilding:  pixel clock = fast_ivt * 4/3 MHz, MIPI lane rate = fast_iop * 3 Mbit/s,
- * frame rate = pixel clock / (fast_hts * fast_vts).  The defaults give 15.06 fps at 1296 Mbit/s per lane, which was clean on the 2-lane
- * link; picture corruption (magenta speckle, broken lines) starts around 1370 Mbit/s even though frames keep arriving, the lane rate
+ * frame rate = pixel clock / (fast_hts * fast_vts).  The defaults give 15.06 fps at 1296 Mbit/s per lane, which scored at the noise floor on the
+ * 2-lane link; the first trace of isolated outlier pixels is at 1344 Mbit/s and clear damage (speckle, broken lines) from ~1370 Mbit/s even though
+ * frames keep arriving (see README, tools/corruption_check.py), the lane rate
  * is limited to about 1500 Mbit/s (nothing arrives above it), and the IVT multiplier saturates at 511 (pixel clock 681 MHz).
  * vts must stay at 3572 (a shorter frame length stops the stream).
  */

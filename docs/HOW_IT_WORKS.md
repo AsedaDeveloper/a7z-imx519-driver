@@ -65,6 +65,11 @@ The Allwinner ISP and scaler sub-devices clamp the width to a hard-coded 4224 (`
 lost. With the ISP bypassed the hardware has no such limit: the patch raises the clamps to 4800 and full-width raw
 frames work (verified with the sensor's colour-bar test pattern: eight bars across all 4656 columns, no overflow).
 
+That 4224 clamp is for the bypassed-ISP raw path this driver uses. When the ISP is *used* (the experimental path in
+`experimental/hw-isp/`, vendor 5.15 kernel) the limit is lower: a single ISP handles at most 3264 pixels per line (`vin_os.c`
+`max_width`, and `sunxi_isp.c` clamps the format to 3264 unless `large_image == 3`). Wider modes, up to the full 4656x3496, need the
+vendor's "2-in-1" mode; see that folder's README.
+
 ## Useful debugging recipes
 * **Real line length the sensor sends** (shows mode / I2C problems): the combo CSI port's packet-header register,
   `devmem` / `/dev/mem` at physical `0x5810000 + 0x151c` while streaming (bits 31:16 = word count in bytes, bits 5:0 =

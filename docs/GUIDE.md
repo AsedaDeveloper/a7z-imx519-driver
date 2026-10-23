@@ -36,8 +36,9 @@ A Raspberry Pi camera module (Sony IMX519, 16 MP, autofocus) plugged into a Radx
 that explains almost everything else in this guide:
 
 > **The Raspberry Pi has a dedicated camera chip (an ISP) that does demosaicing, white balance and autofocus
-> math in hardware. The A7Z's chip (Allwinner A733) has no usable equivalent — Allwinner's own ISP needs closed
-> libraries this project doesn't have. So every one of those jobs is done in software, on the CPU, by the tools
+> math in hardware. On the kernel this guide targets, the A7Z's chip (Allwinner A733) has no usable equivalent — Allwinner's own ISP needs
+> closed libraries this project doesn't ship (an experimental path that does drive it exists for the older vendor kernel, in
+> `experimental/hw-isp/`). So every one of those jobs is done in software, on the CPU, by the tools
 > in this repository.**
 
 That's why stills take a moment to process after the shot, why video tops out around 30 fps instead of something
@@ -305,7 +306,7 @@ v4l2-ctl -d /dev/video0 --set-input=0 --set-ctrl=exposure=1500,gain=64,focus_abs
 ```
 Notes:
 - Only `RG10`/`RG12` (raw Bayer) formats actually stream — the ISP-processed formats a real Pi ISP would expose
-  deliver no frames here, since there is no hardware ISP to produce them.
+  deliver no frames here, since there is no hardware ISP on this driver's kernel to produce them (the experimental `experimental/hw-isp/` path uses it on the vendor 5.15 kernel).
 - Raw buffer layout: 16-bit little-endian words, RGGB Bayer order, black level 64, white level 1023, buffer height
   padded by 8 rows.
 - For live changes while already streaming (rather than at stream start), use the sub-device directly:

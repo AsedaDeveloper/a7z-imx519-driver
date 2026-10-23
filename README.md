@@ -6,9 +6,10 @@ Linux driver, device-tree overlay and tools for the **Sony IMX519 16 MP autofocu
 
 > **Status: beta.** It captures real images, runs manual exposure up to minutes, does contrast autofocus and a live
 > view, and has survived stress tests. It is **not** a drop-in replacement for the Raspberry Pi camera stack:
-> there is no hardware ISP (processing is done on the CPU); libcamera support is new and limited. See [What works](#what-works) and
+> there is no hardware ISP on this driver's kernel (processing is done on the CPU); libcamera support is new and limited. See [What works](#what-works) and
 > [Known limitations](#known-limitations) before you build on it.
-> A separate, experimental path through the SoC's hardware ISP lives in [`experimental/hw-isp/`](experimental/hw-isp/README.md).
+> A separate, experimental path through the SoC's hardware ISP, for Radxa's older vendor 5.15 kernel only (full 16 MP at up to 15 fps), lives in
+> [`experimental/hw-isp/`](experimental/hw-isp/README.md).
 
 Raspberry Pi OS supports this module out of the box. The Allwinner A733 does not: Radxa ships no IMX519 driver, the
 SoC's camera framework (VIN) differs completely from V4L2/libcamera on the Pi, and the board's camera connector
@@ -37,10 +38,11 @@ has a few traps that cost the author days. This repository documents and fixes a
 ## Known limitations
 
 * **Video:** H.264 uses the hardware encoder when GStreamer and the Allwinner OMX plugin are installed (see docs/USAGE.md), otherwise libx264 in software (~17 fps at 1080p). The demosaic and tone curve still run on the CPU (~3 cores at 1080p30). No audio, no raw video, only H.264 in MP4.
-* **No ISP.** The A733's ISP needs Allwinner's closed user-space libraries. Everything an ISP does (black level,
+* **No ISP on this driver's kernel.** The A733's ISP needs Allwinner's closed user-space libraries (the experimental path in
+  `experimental/hw-isp/` does drive it, but only on the vendor 5.15 kernel). Everything an ISP does (black level,
   white balance, demosaic, auto exposure, autofocus) is done in user space by the tools here. Colour is
   "good", not calibrated; lens shading is correctable but only after you calibrate your module; no noise reduction.
-* **Only the RAW formats stream** (`RG10`, `RG12`); the ISP-processed formats (`NV12`, `RGB3`, …) deliver no frames.
+* **Only the RAW formats stream** (`RG10`, `RG12`) with this driver; the ISP-processed formats (`NV12`, `RGB3`, …) deliver no frames (they do on the vendor-kernel path in `experimental/hw-isp/`).
 * Frame timing is stable: the same setting gave 282.827-282.836 ms over four reboots (0.003 %), about 0.1 % longer than the nominal line-time calculation.
 * Exposure changes need ~2 frames to reach the output (a sensor property). A fresh stream always wastes its first
   frame (a VIN property): keep the stream open for continuous capture.
