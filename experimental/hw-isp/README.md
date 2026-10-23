@@ -11,19 +11,15 @@ through Radxa's vendor `vin` stack and Allwinner's closed-source ISP library (`l
 | | |
 |---|---|
 | Hardware-ISP frames (YUV420) | yes, 1920x1080 and 2328x1748 at 30 fps, **3264x2448 at ~13 fps** |
+| **Full 16 MP through the ISP** | **yes, 4656x3496 at ~9 fps** (and 3840x2160 at ~18 fps) using the vendor 2-in-1 mode, see below |
 | Colour | white balance, CCM and black level tuned against a displayed 24-patch chart (see `tuning/`) |
 | Autofocus | own userspace contrast-detect AF in `a7zcap` (libisp's own AF never focuses on this module) |
 | Lens driver | `ak7375_act.c` + a fix for a mutex that Radxa's `actuator.c` never releases (hangs the process in D state) |
 
 ## What does not work (yet)
 
-* **Anything wider than 3264.** The single ISP is limited to 3264 pixels per line (`vin_os.c: max_width = 3264`, and
-  `sunxi_isp.c` clamps the format to 3264 unless `large_image == 3`). 3840x2160 and the full 4656x3496 negotiate but never
-  deliver a frame. The vendor "2-in-1" mode (CSI splits one sensor stream into two overlapping halves for ISP0/ISP1) is the way
-  around it; `userspace/a7zdual.c` is an experiment that drives both video nodes. **It does not work yet**: both nodes and both
-  ISPs start, but the kernel logs `sunxi_csi.1 setup link sunxi_tdm_rx.0 fail!` and no frames arrive, even for the known-good
-  3264x2448 mode. The second CSI channel -> TDM rx1 media link is not being set up. Full 16 MP is only available through the
-  raw-path driver.
+* The 2-in-1 capture tool (`a7zdual`) is a separate program from `a7zcap`: it has no autofocus loop and no `A7Z_FLAT`. Folding it into `a7zcap` is not done.
+* No seam handling has been needed so far, but only a handful of scenes were checked; look for a join at the middle column on yours.
 * **Software flat-field (`A7Z_FLAT`) is off and ships no map.** Applying a gain map to the final 8-bit image clips highlights (27%
   of a bright test frame). A correct fix belongs in the ISP's own lens-shading stage on raw data.
 * Colour tuning is specific to one module/lens/screen. Treat `tuning_v4.json` as an example, not a calibration for your camera.
@@ -35,11 +31,32 @@ through Radxa's vendor `vin` stack and Allwinner's closed-source ISP library (`l
 produced by the VIPP scaler from it. Select a mode by asking for **its** frame rate: `A7Z_FPS=13 a7zcap 3264 2448 ...`.
 (9 = 4656x3496, 13 = 3264x2448, 18 = 3840x2160, 30 = 2328x1748, 60 = 1920x1080.)
 
+## Full 16 MP: the 2-in-1 mode
+
+The single ISP is limited to 3264 pixels per line (`vin_os.c: max_width = 3264`; `sunxi_isp.c` clamps the format to 3264 unless
+`large_image == 3`). Wider modes use the vendor "2-in-1" mode: the CSI parser splits one sensor stream into two overlapping halves,
+one per ISP, and both DMAs write into one buffer. **No kernel change is needed**, but three things must all be right
+(`userspace/a7zdual.c`):
+
+1. `SET_DMA_MERGE = 1` and open **only `/dev/video1`**. The driver forwards `S_INPUT`/`S_FMT`/`S_PARM` to `video0` itself (forcing
+   `large_image = 3`) and streams both pipelines. Opening both nodes yourself makes them fight over the media links (`sunxi_csi.1
+   setup link sunxi_tdm_rx.0 fail!`, because the media core refuses to change a link while its CSI is streaming).
+2. Request the sensor mode's own frame rate through `S_PARM` (see the table above).
+3. Call libisp's `ispSetIspLargeImage(id)` on **both** ISP instances before `ispStart`. The demo path never calls it. Without it the
+   pipeline delivers one or two frames and then stalls with `tdm0 rx0 buffer full`, at every size.
+
+```sh
+A7Z_MERGE=1 A7Z_FPS=9 ./a7zdual 4656 3496 20 /tmp/cap/full     # full 16 MP, ~9 fps
+```
+
+The output file is raw planar 4:2:0 with **padded plane heights** (3504 luma rows for 3496), exactly as `bytesused` reports; decode it
+with the padded sizes or the chroma planes come out misaligned.
+
 ## Layout
 
 ```
-userspace/a7zcap.c      capture through libAWIspApi; env: A7Z_FPS A7Z_AF A7Z_FOCUS A7Z_SWEEP A7Z_EVERY A7Z_STDOUT A7Z_LARGE A7Z_FLAT
-userspace/a7zdual.c     2-in-1 dual-node experiment (does not work yet, see above)
+userspace/a7zcap.c      capture through libAWIspApi (single node, up to 3264); env: A7Z_FPS A7Z_AF A7Z_FOCUS A7Z_SWEEP A7Z_EVERY A7Z_STDOUT A7Z_FLAT
+userspace/a7zdual.c     2-in-1 capture for widths above 3264, up to the full 4656x3496 (see below)
 userspace/liveview.sh   live view over ssh + ffplay
 kernel/imx519_mipi.c    sensor driver for the vendor vin framework (adds the 3264x2448 centre-crop mode)
 kernel/ak7375_act.c     AK7375 focus actuator
@@ -69,6 +86,7 @@ gcc -O2 -o a7zcap userspace/a7zcap.c -Wl,--no-as-needed -Wl,--export-dynamic \
     -lAWIspApi -lisp -lm -lpthread -ldl -Wl,--allow-shlib-undefined
 A7Z_AF=1 A7Z_EVERY=10 ./a7zcap 1920 1080 100 /tmp/cap/shot            # autofocus + frames
 A7Z_FPS=13 A7Z_FOCUS=1830 ./a7zcap 3264 2448 12 /tmp/cap/big           # 8 MP
+# a7zdual builds with the same gcc line (replace a7zcap.c / a7zcap)
 ```
 
 `--export-dynamic` is required: `a7zcap` exports its own `ioctl()` so it can swallow libisp's lens commands while it runs its own

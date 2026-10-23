@@ -1,6 +1,14 @@
-// a7zdual: experiment - drive BOTH vin nodes in the A733 "2-in-1" (large_image=3) mode so a sensor mode wider than the
-// single-ISP limit (3264) is split by the CSI parser into two overlapping halves, one per ISP.
-// usage: A7Z_FPS=18 a7zdual WIDTH HEIGHT NFRAMES PREFIX   (writes PREFIX_<node>_<n>_<w>x<h>.yuv for the last frame of each node)
+// a7zdual: capture through the A733 "2-in-1" (large image) mode, which lifts the single-ISP limit of 3264 pixels per line.
+// The CSI parser splits one sensor stream into two overlapping halves, one per ISP, and both DMAs write into one buffer.
+// What makes it work (all three are required):
+//   1. A7Z_MERGE=1: SET_DMA_MERGE=1 and open ONLY /dev/video1. The driver forwards S_INPUT/S_FMT/S_PARM to video0 itself
+//      (forcing large_image=3) and streams both pipelines. Opening both nodes yourself makes them fight over the media links.
+//   2. A7Z_FPS=<fps_fixed of the sensor mode>: the sensor-mode selector only considers modes with that frame rate.
+//   3. libisp must be told it is a large image: ispSetIspLargeImage(id) on BOTH ISP instances, before ispStart.
+//      Without it the pipeline delivers 1-2 frames and then stalls ("tdm0 rx0 buffer full").
+// usage: A7Z_MERGE=1 A7Z_FPS=9 a7zdual 4656 3496 NFRAMES PREFIX   (writes the NFRAMES-th frame: PREFIX_n0_<n>_<w>x<h>.yuv)
+// The file is raw planar 4:2:0 with padded plane heights (e.g. 3504 luma rows for 3496), exactly as bytesused reports.
+// A7Z_MERGE=0 keeps the old two-node experiment, which does not work.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,11 +27,11 @@
 struct node { int fd, np, w, h; void *mp[NBUF][NPL]; size_t ml[NBUF][NPL]; int frames; };
 static int xi(int fd, unsigned long r, void *a, const char *n) { int x = ioctl(fd, r, a); if (x < 0) fprintf(stderr, "[dual] fd%d %s failed: %s\n", fd, n, strerror(errno)); return x; }
 
-static int setup(struct node *nd, int idx, int W, int H, int fps, int large)
+static int setup(struct node *nd, int idx, int W, int H, int fps, int large, int merge)
 {
 	char dev[32]; snprintf(dev, sizeof dev, "/dev/video%d", idx);
 	nd->fd = open(dev, O_RDWR); if (nd->fd < 0) { perror(dev); return -1; }
-	unsigned char merge = 0; xi(nd->fd, VIDIOC_SET_DMA_MERGE, &merge, "SET_DMA_MERGE");
+	unsigned char mg = merge; xi(nd->fd, VIDIOC_SET_DMA_MERGE, &mg, "SET_DMA_MERGE");
 	int input = 0; if (xi(nd->fd, VIDIOC_S_INPUT, &input, "S_INPUT")) return -1;
 	struct v4l2_streamparm p; memset(&p, 0, sizeof p);
 	p.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; p.parm.capture.capturemode = V4L2_MODE_VIDEO;
@@ -60,12 +68,16 @@ int main(int argc, char **argv)
 	if (argc < 5) { fprintf(stderr, "usage: %s W H N PREFIX\n", argv[0]); return 2; }
 	int W = atoi(argv[1]), H = atoi(argv[2]), N = atoi(argv[3]);
 	int fps = getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30, large = getenv("A7Z_LARGE") ? atoi(getenv("A7Z_LARGE")) : 3;
-	int nodes = getenv("A7Z_NODES") ? atoi(getenv("A7Z_NODES")) : 2;
+	int merge = getenv("A7Z_MERGE") ? atoi(getenv("A7Z_MERGE")) : 0;   // 1 = intended 2-in-1 path: open ONLY video1, driver drives video0 too
+	int nodes = merge ? 1 : (getenv("A7Z_NODES") ? atoi(getenv("A7Z_NODES")) : 2);
+	int first = merge ? 1 : 0;
 	struct node nd[2]; memset(nd, 0, sizeof nd);
-	for (int i = 0; i < nodes; i++) if (setup(&nd[i], i, W, H, fps, large)) return 1;
+	for (int i = 0; i < nodes; i++) if (setup(&nd[i], first + i, W, H, fps, large, merge)) return 1;
 	AWIspApi *api = CreateAWIspApi();
-	for (int i = 0; i < nodes; i++) {
-		int id = api ? api->ispGetIspId(i) : -1; fprintf(stderr, "[dual] node %d isp_id=%d\n", i, id);
+	int nisp = merge ? 2 : nodes;                       // merge mode needs both ISP instances running
+	for (int i = 0; i < nisp; i++) {
+		int id = api ? api->ispGetIspId(i) : -1; fprintf(stderr, "[dual] isp slot %d isp_id=%d\n", i, id);
+		if (api && id >= 0 && merge && !getenv("A7Z_NOLARGEIMG")) fprintf(stderr, "[dual] ispSetIspLargeImage(%d)=%d\n", id, api->ispSetIspLargeImage(id));   // tell libisp this is a 2-in-1 large image
 		if (api && id >= 0) fprintf(stderr, "[dual] ispStart(%d)=%d\n", id, api->ispStart(id));
 	}
 	enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -93,7 +105,7 @@ int main(int argc, char **argv)
 		}
 	}
 	for (int i = 0; i < nodes; i++) xi(nd[i].fd, VIDIOC_STREAMOFF, &t, "STREAMOFF");
-	if (api) { for (int i = 0; i < nodes; i++) { int id = api->ispGetIspId(i); if (id >= 0) api->ispStop(id); } DestroyAWIspApi(api); }
+	if (api) { for (int i = 0; i < nisp; i++) { int id = api->ispGetIspId(i); if (id >= 0) api->ispStop(id); } DestroyAWIspApi(api); }
 	fprintf(stderr, "[dual] done frames: n0=%d n1=%d\n", nd[0].frames, nodes > 1 ? nd[1].frames : 0);
 	return 0;
 }
