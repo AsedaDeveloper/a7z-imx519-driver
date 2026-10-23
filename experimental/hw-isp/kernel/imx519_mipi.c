@@ -62,6 +62,27 @@ MODULE_PARM_DESC(stream_delay_ms, "delay between the last mode register write an
 static int term_res = 1;
 module_param(term_res, int, 0644);
 MODULE_PARM_DESC(term_res, "enable the 100ohm MIPI termination (1) or not (0)");
+/*
+ * Tunable full-resolution mode (select it with frame rate 15, i.e. A7Z_FPS=15): the same register set as the 9 fps full mode, but the
+ * PLL multipliers, line length and frame length come from these parameters at every stream start, so the speed can be tuned
+ * from a shell without rebuilding:  pixel clock = fast_ivt * 4/3 MHz, MIPI lane rate = fast_iop * 3 Mbit/s,
+ * frame rate = pixel clock / (fast_hts * fast_vts).  The defaults give 15.06 fps at 1296 Mbit/s per lane, which was clean on the 2-lane
+ * link; picture corruption (magenta speckle, broken lines) starts around 1370 Mbit/s even though frames keep arriving, the lane rate
+ * is limited to about 1500 Mbit/s (nothing arrives above it), and the IVT multiplier saturates at 511 (pixel clock 681 MHz).
+ * vts must stay at 3572 (a shorter frame length stops the stream).
+ */
+static int fast_ivt = 480;
+module_param(fast_ivt, int, 0644);
+MODULE_PARM_DESC(fast_ivt, "IVT PLL multiplier of the tunable full-res mode (pixel clock = n*4/3 MHz)");
+static int fast_iop = 432;
+module_param(fast_iop, int, 0644);
+MODULE_PARM_DESC(fast_iop, "IOP PLL multiplier of the tunable full-res mode (MIPI lane rate = n*3 Mbit/s)");
+static int fast_hts = 11900;
+module_param(fast_hts, int, 0644);
+MODULE_PARM_DESC(fast_hts, "line length in pixel clocks of the tunable full-res mode");
+static int fast_vts = 3572;
+module_param(fast_vts, int, 0644);
+MODULE_PARM_DESC(fast_vts, "frame length in lines of the tunable full-res mode");
 #define IMX519_COMBO_MODE() ((term_res ? CMB_TERMINAL_RES : 0) | ((phy_offset & 3) << 4) | MIPI_NORMAL_MODE)
 
 #define MCLK              (24*1000*1000)
@@ -384,6 +405,95 @@ static struct regval_list sensor_default_regs[] = {
 
 static struct regval_list sensor_full_regs[] = {
 	/* 4656x3496, hts 12650, vts 3572, about 9.4 fps */
+	{0x0111, 0x02},
+	{0x0112, 0x0a},
+	{0x0113, 0x0a},
+	{0x0114, 0x01},
+	{0x0342, 0x31},
+	{0x0343, 0x6a},
+	{0x0340, 0x0d},
+	{0x0341, 0xf4},
+	{0x0344, 0x00},
+	{0x0345, 0x00},
+	{0x0346, 0x00},
+	{0x0347, 0x00},
+	{0x0348, 0x12},
+	{0x0349, 0x2f},
+	{0x034a, 0x0d},
+	{0x034b, 0xa7},
+	{0x0220, 0x00},
+	{0x0221, 0x11},
+	{0x0222, 0x01},
+	{0x0900, 0x00},
+	{0x0901, 0x11},
+	{0x0902, 0x0a},
+	{0x3f4c, 0x01},
+	{0x3f4d, 0x01},
+	{0x4254, 0x7f},
+	{0x0401, 0x00},
+	{0x0404, 0x00},
+	{0x0405, 0x10},
+	{0x0408, 0x00},
+	{0x0409, 0x00},
+	{0x040a, 0x00},
+	{0x040b, 0x00},
+	{0x040c, 0x12},
+	{0x040d, 0x30},
+	{0x040e, 0x0d},
+	{0x040f, 0xa8},
+	{0x034c, 0x12},
+	{0x034d, 0x30},
+	{0x034e, 0x0d},
+	{0x034f, 0xa8},
+	{0x0301, 0x06},
+	{0x0303, 0x04},
+	{0x0305, 0x06},
+	{0x0306, 0x01},
+	{0x0307, 0x40},
+	{0x0309, 0x0a},
+	{0x030b, 0x02},
+	{0x030d, 0x04},
+	{0x030e, 0x01},
+	{0x030f, 0x10},
+	{0x0310, 0x01},
+	{0x0820, 0x0a},
+	{0x0821, 0x20},
+	{0x0822, 0x00},
+	{0x0823, 0x00},
+	{0x3e20, 0x01},
+	{0x3e37, 0x01},
+	{0x3e3b, 0x00},
+	{0x38a4, 0x00},
+	{0x38a5, 0x00},
+	{0x38a6, 0x00},
+	{0x38a7, 0x00},
+	{0x38a8, 0x01},
+	{0x38a9, 0x23},
+	{0x38aa, 0x01},
+	{0x38ab, 0x23},
+	{0x0106, 0x00},
+	{0x0b00, 0x00},
+	{0x3230, 0x00},
+	{0x3f14, 0x01},
+	{0x3f3c, 0x01},
+	{0x3f0d, 0x0a},
+	{0x3fbc, 0x00},
+	{0x3c06, 0x00},
+	{0x3c07, 0x48},
+	{0x3c0a, 0x00},
+	{0x3c0b, 0x00},
+	{0x3f78, 0x00},
+	{0x3f79, 0x40},
+	{0x3f7c, 0x00},
+	{0x3f7d, 0x00},
+	/* default exposure / gain */
+	{0x0202, 0x03}, {0x0203, 0xe8},
+	{0x0204, 0x00}, {0x0205, 0x00},
+	{0x020e, 0x01}, {0x020f, 0x00},
+};
+
+static struct regval_list sensor_fullfast_regs[] = {
+	/* 4656x3496, tunable (fast_* module parameters) */
 	{0x0111, 0x02},
 	{0x0112, 0x0a},
 	{0x0113, 0x0a},
@@ -1308,6 +1418,26 @@ static struct sensor_win_size sensor_win_sizes[] = {
 	 .regs_size = ARRAY_SIZE(sensor_full_regs),
 	 .set_size = NULL,
 	 },
+	/* 4656*3496, tunable speed (frame rate 15 selects it) */
+	{
+	 .width = 4656,
+	 .height = 3496,
+	 .hoffset = 0,
+	 .voffset = 0,
+	 .hts = 11900,
+	 .vts = 3572,
+	 .pclk = 640000000,
+	 .mipi_bps = 1296000000,
+	 .fps_fixed = 15,
+	 .bin_factor = 1,
+	 .intg_min = 20 << 4,
+	 .intg_max = 505928 << 4,
+	 .gain_min = 1 << 4,
+	 .gain_max = 64 << 4,
+	 .regs = sensor_fullfast_regs,
+	 .regs_size = ARRAY_SIZE(sensor_fullfast_regs),
+	 .set_size = NULL,
+	 },
 	/* 3840*2160 */
 	{
 	 .width = 3840,
@@ -1440,6 +1570,22 @@ static int sensor_reg_init(struct sensor_info *info)
 
 	if (wsize->set_size)
 		wsize->set_size(sd);
+
+	if (wsize->regs == sensor_fullfast_regs) {	/* tunable full-res mode: apply the module parameters */
+		sensor_write(sd, 0x0306, (fast_ivt >> 8) & 0xff);
+		sensor_write(sd, 0x0307, fast_ivt & 0xff);
+		sensor_write(sd, 0x030e, (fast_iop >> 8) & 0xff);
+		sensor_write(sd, 0x030f, fast_iop & 0xff);
+		sensor_write(sd, 0x0342, (fast_hts >> 8) & 0xff);
+		sensor_write(sd, 0x0343, fast_hts & 0xff);
+		wsize->hts = fast_hts;
+		wsize->vts = fast_vts;
+		wsize->pclk = (unsigned int)div_u64((u64)fast_ivt * 4000000ULL, 3);
+		wsize->mipi_bps = fast_iop * 3000000U;
+		sensor_print("fast mode: ivt=%d iop=%d hts=%d vts=%d -> pclk %u, lane %u bps, %u.%02u fps\n", fast_ivt, fast_iop, fast_hts, fast_vts,
+			     wsize->pclk, wsize->mipi_bps, (unsigned int)div_u64((u64)wsize->pclk * 100, (u64)fast_hts * fast_vts) / 100,
+			     (unsigned int)div_u64((u64)wsize->pclk * 100, (u64)fast_hts * fast_vts) % 100);
+	}
 
 	/* the frame length of THIS mode must be known before any exposure is written */
 	imx519_mipi_sensor_vts = imx519_user_vblank ? imx519_user_vblank + wsize->height : wsize->vts;

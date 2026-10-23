@@ -11,7 +11,7 @@ through Radxa's vendor `vin` stack and Allwinner's closed-source ISP library (`l
 | | |
 |---|---|
 | Hardware-ISP frames (YUV420) | yes, 1920x1080 and 2328x1748 at 30 fps, **3264x2448 at ~13 fps** |
-| **Full 16 MP through the ISP** | **yes, 4656x3496 at ~9 fps** (and 3840x2160 at ~18 fps) using the vendor 2-in-1 mode, see below |
+| **Full 16 MP through the ISP** | **yes, 4656x3496 at 9.4 fps (`A7Z_FPS=9`) or 15 fps (`A7Z_FPS=15`)**, and 3840x2160 at 18 fps (picture checked clean), using the vendor 2-in-1 mode, see below |
 | Colour | white balance, CCM and black level tuned against a displayed 24-patch chart (see `tuning/`) |
 | Autofocus | own userspace contrast-detect AF in `a7zcap` (libisp's own AF never focuses on this module) |
 | Lens driver | `ak7375_act.c` + a fix for a mutex that Radxa's `actuator.c` never releases (hangs the process in D state) |
@@ -46,8 +46,32 @@ one per ISP, and both DMAs write into one buffer. **No kernel change is needed**
    pipeline delivers one or two frames and then stalls with `tdm0 rx0 buffer full`, at every size.
 
 ```sh
-A7Z_MERGE=1 A7Z_FPS=9 ./a7zdual 4656 3496 20 /tmp/cap/full     # full 16 MP, ~9 fps
+A7Z_MERGE=1 A7Z_FPS=15 ./a7zdual 4656 3496 20 /tmp/cap/full    # full 16 MP, 15 fps (A7Z_FPS=9: 9.4 fps, stock clocks)
 ```
+
+### Going faster than 9.4 fps at 16 MP
+
+The stock full-res mode runs the sensor at 816 Mbit/s per lane (9.44 fps). `A7Z_FPS=15` selects a second full-res mode whose clocks
+are module parameters (`/sys/module/imx519_mipi/parameters/fast_{ivt,iop,hts,vts}`, read at every stream start; try new values
+with `tools/sweep_fps.sh`). The defaults give **15.06 fps at 1296 Mbit/s per lane**: 300 consecutive frames, no drops, no link damage.
+What limits it, measured on one module and one 15-pin cable:
+
+| lane rate | fps | picture |
+|---|---|---|
+| 1224 Mbit/s | 14.2 | clean |
+| 1296 Mbit/s | 15.06 | clean (default) |
+| 1344 Mbit/s | 15.6 | clean |
+| 1368 Mbit/s | 15.9 | first damaged pixels (0.01%) |
+| 1392 Mbit/s | 15.1 | visible magenta ring (0.77%) |
+| 1500 Mbit/s | 16.6 | badly damaged (13.7%) |
+| 1560 Mbit/s and up | no frames at all | |
+
+* **The link, not the ISP, is the limit.** The module has two lanes. A frame carries ~81 Mbit per lane, so ~1.35 Gbit/s gives ~16 fps at best.
+* **Frames keep arriving while the picture is damaged.** Counting frames or watching the kernel log tells you nothing; score the image with
+  `tools/corruption_check.py`. The errors are data dependent (they show up at certain brightness values), so a flat test patch can pass
+  while a gradient fails. Only a bright indoor scene was tested for the defaults; a longer or different-scene soak would be wise before
+  trusting them on another module or a longer cable.
+* The IVT multiplier saturates at 511 (681 MHz pixel clock), and a frame length below 3572 stops the stream.
 
 The output file is raw planar 4:2:0 with **padded plane heights** (3504 luma rows for 3496), exactly as `bytesused` reports; decode it
 with the padded sizes or the chroma planes come out misaligned.
@@ -63,7 +87,7 @@ kernel/ak7375_act.c     AK7375 focus actuator
 kernel/actuator-mutex-fix.patch   fix for the vendor actuator.c
 overlay/imx519-j5-isp.dts         device-tree overlay for ISP mode
 tuning/                 build a libisp parameter file from YOUR OWN library (see below)
-tools/                  chart scorer, (experimental) flat-field map builder
+tools/                  chart scorer, (experimental) flat-field map builder, fps sweep + link-corruption checker
 ```
 
 ## You need your own copy of the Allwinner library

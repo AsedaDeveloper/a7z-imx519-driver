@@ -19,12 +19,13 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <time.h>
 #include <linux/videodev2.h>
 #include "sunxi_camera_v2.h"
 #include "AWIspApi.h"
 #define NBUF 4
 #define NPL 3
-struct node { int fd, np, w, h; void *mp[NBUF][NPL]; size_t ml[NBUF][NPL]; int frames; };
+struct node { double t5, tN; int fd, np, w, h; void *mp[NBUF][NPL]; size_t ml[NBUF][NPL]; int frames; };
 static int xi(int fd, unsigned long r, void *a, const char *n) { int x = ioctl(fd, r, a); if (x < 0) fprintf(stderr, "[dual] fd%d %s failed: %s\n", fd, n, strerror(errno)); return x; }
 
 static int setup(struct node *nd, int idx, int W, int H, int fps, int large, int merge)
@@ -94,6 +95,8 @@ int main(int argc, char **argv)
 			b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; b.memory = V4L2_MEMORY_MMAP; b.length = nd[i].np; b.m.planes = pl;
 			if (xi(nd[i].fd, VIDIOC_DQBUF, &b, "DQBUF")) continue;
 			nd[i].frames++;
+			{ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+			  if (nd[i].frames == 5) nd[i].t5 = now; if (nd[i].frames == N) nd[i].tN = now; }
 			if (nd[i].frames == N) {
 				char name[256]; snprintf(name, sizeof name, "%s_n%d_%d_%dx%d.yuv", argv[4], i, nd[i].frames, nd[i].w, nd[i].h);
 				FILE *f = fopen(name, "wb");
@@ -106,6 +109,7 @@ int main(int argc, char **argv)
 	}
 	for (int i = 0; i < nodes; i++) xi(nd[i].fd, VIDIOC_STREAMOFF, &t, "STREAMOFF");
 	if (api) { for (int i = 0; i < nisp; i++) { int id = api->ispGetIspId(i); if (id >= 0) api->ispStop(id); } DestroyAWIspApi(api); }
+	if (nd[0].frames >= N && N > 5) fprintf(stderr, "[dual] measured %.2f fps over frames 5..%d\n", (N - 5) / (nd[0].tN - nd[0].t5), N);
 	fprintf(stderr, "[dual] done frames: n0=%d n1=%d\n", nd[0].frames, nodes > 1 ? nd[1].frames : 0);
 	return 0;
 }
