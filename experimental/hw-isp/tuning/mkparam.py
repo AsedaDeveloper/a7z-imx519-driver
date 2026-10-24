@@ -6,7 +6,7 @@ param = test(124) + 3a(2724) + tuning(99440) + iso(13996).
 The base struct is NOT shipped (closed-source Allwinner data): make it from your own library first with
     extract_isp_defaults.py  ->  defaults.bin
 usage: mkparam.py DEFAULTS.bin OUT.bin [config.json | '{"kr":1.66,...}']
-config keys: kr kb (white-balance scale of the 9 AWB lights), ccm_fix/ccm_offset, intpatch, testint, blcpatch, flags_all_on,
+config keys: kr kb (white-balance scale of the 9 AWB lights), light_rb (absolute [r, b] for each of the 9 AWB lights, applied after kr/kb), ccm_fix/ccm_offset, intpatch, testint, blcpatch, flags_all_on,
              flagbytes, lsc_pattern, lsc_alpha
 """
 import sys, struct, json, os, numpy as np
@@ -24,6 +24,11 @@ kr, kb = cfg.get("kr", 1.0), cfg.get("kb", 1.0)
 for o in lights():
     r, g, b = struct.unpack_from("<3i", p, o)
     struct.pack_into("<3i", p, o, int(round(r * kr)), g, int(round(b * kb)))
+# absolute (r, b) per AWB light, in the ISP's own units (not ratio*256: the response is ~gain^-2.5, see tuning/README); calibrated against measured neutral white points
+if cfg.get("light_rb"):
+    for o, (r, b) in zip(lights(), cfg["light_rb"]):
+        _, g, _ = struct.unpack_from("<3i", p, o)
+        struct.pack_into("<3i", p, o, int(r), g, int(b))
 # CCM: three 3x3 int16 matrices (unity 256) + 3 offsets each, 12 int16 apart, at tuning-block int16 index 42181 (2800K, 4000K, 6500K)
 if cfg.get("ccm_fix"):
     Mf = np.array(cfg["ccm_fix"], dtype=float).reshape(3, 3)
