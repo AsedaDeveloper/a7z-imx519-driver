@@ -69,6 +69,8 @@ static void dump_live_param(void)
 // ---- lens ownership: when A7Z_AF is set, libisp's lens commands are swallowed so only our own autofocus moves the lens ----
 static volatile int g_block_isp_lens = 0;
 static volatile int g_in_af = 0;
+static int g_hae = 0, g_hae_log = 0; static double g_hae_T = 0, g_hae_target = 118, g_hae_clip = 0.010;   // A7Z_HAE=1: highlight-aware exposure, replaces libisp's exposure request (it cannot be steered: target/bias controls are inert)
+static int g_hae_exp = 0, g_hae_gain = 0;
 static double g_rmul = 1.0, g_bmul = 1.0;   // A7Z_RMUL / A7Z_BMUL: scale the ISP's final white-balance gains (r_gain/b_gain) on their way to the driver
 static int g_maxexp = 0, g_maxgain = 512;   // A7Z_MAXEXP (us) / A7Z_MAXGAIN: global exposure cap for a smooth frame rate in dim light
 static int g_af_expdiv = 1, g_af_gainmax = 256;   // A7Z_AF_EXPDIV / A7Z_AF_GAINMAX: exposure cap during autofocus
@@ -84,6 +86,15 @@ int ioctl(int fd, unsigned long req, ...)
 		if (g_af_expdiv > 1 && g_in_af && eg->gain_val > 0) {    // autofocus only: shorter exposure (faster frames), gain raised to keep the brightness
 			int g = eg->gain_val * g_af_expdiv; if (g > g_af_gainmax) g = g_af_gainmax;
 			if (g > eg->gain_val) { eg->exp_val = (int)((long long)eg->exp_val * eg->gain_val / g); eg->gain_val = g; }
+		}
+		if (g_hae && eg->gain_val > 0 && eg->exp_val > 0) {
+			int cap = g_maxexp > 0 ? g_maxexp : 33000;
+			if (g_hae_T <= 0) g_hae_T = (double)eg->exp_val * eg->gain_val;                   // start from libisp's first request, then take over
+			double tmax = (double)cap * g_maxgain; if (g_hae_T > tmax) g_hae_T = tmax;
+			double tmin = 40.0 * 16; if (g_hae_T < tmin) g_hae_T = tmin;
+			int e = (int)(g_hae_T / 16.0); if (e > cap) e = cap; if (e < 40) e = 40;
+			int g = (int)(g_hae_T / e + 0.5); if (g < 16) g = 16;
+			eg->exp_val = e; eg->gain_val = g; g_hae_exp = e; g_hae_gain = g;
 		}
 		if (g_maxexp > 0 && eg->exp_val > g_maxexp && eg->gain_val > 0) {    // dim light: trade exposure for gain so frames keep coming at full rate
 			long long g = (long long)eg->gain_val * eg->exp_val / g_maxexp; if (g > g_maxgain) g = g_maxgain;
@@ -146,6 +157,22 @@ static double sharpness_blocks(const unsigned char *y, int stride, int x0, int x
 	double a = 0; for (int i = 0; i < 12; i++) a += sc[i];
 	return a / 12.0;
 }
+static int g_hae_stable = 0;
+static void hae_step(const unsigned char *yp, int gw, int gh)     // highlight-aware exposure: sparse luma sample (1/64 of the pixels, uncached DMA buffer), nudges g_hae_T
+{
+	static int tick = 0, nlog = 0;
+	if (!g_hae || g_hae_T <= 0 || g_in_af || (tick++ & 1)) return;      // frozen during autofocus: a moving exposure would corrupt the sharpness comparison
+	long cnt = 0, sum = 0, hi = 0, vhi = 0;
+	for (int r = 4; r < gh; r += 8) for (int c = 4; c < gw; c += 8) { int v = yp[(size_t)r * gw + c]; sum += v; cnt++; if (v >= 245) hi++; if (v >= 235) vhi++; }
+	double M = (double)sum / cnt, C = (double)hi / cnt, sc = 1.0;
+	if (C > g_hae_clip && M > 55) sc = C > 4 * g_hae_clip ? 0.90 : 0.95;                 // clipped highlights: back off (not into the dark)
+	else if (C > 0.7 * g_hae_clip) sc = M > g_hae_target + 8 ? 0.97 : 1.0;                // at the clip budget: hold (or come down if bright anyway)
+	else if (M < g_hae_target - 6) sc = (g_hae_target / (M + 1)) > 2.0 ? 1.35 : (g_hae_target / (M + 1)) > 1.3 ? 1.08 : 1.03;   // dark and nothing clipping: come up
+	else if (M > g_hae_target + 10) sc = 0.97;
+	g_hae_T *= sc;
+	g_hae_stable = (sc > 0.985 && sc < 1.035) ? g_hae_stable + 1 : 0;
+	if (g_hae_log && (nlog++ % 15) == 0) fprintf(stderr, "[a7zcap] HAE meanY %.1f clip %.2f%% hi235 %.2f%% exp %d gain %d\n", M, C * 100, 100.0 * vhi / cnt, g_hae_exp, g_hae_gain);
+}
 static long g_af_frames = 0; static int g_af_trace = 0;
 // The capture buffers are uncached DMA memory: reading them pixel by pixel from the CPU is slow (and on a little core it made each AF frame take 100-400 ms, so
 // the driver dropped 1 frame in 2 to 1 in 8). Copy the region once with row memcpy, hand the buffer back, then score the cached copy.
@@ -167,6 +194,7 @@ static double grab_sharp(int skip, int avg)
 			if ((size_t)w * h > g_roi_cap) { g_roi_cap = (size_t)w * h; g_roi = realloc(g_roi, g_roi_cap); }
 			for (int r = 0; r < h; r++) memcpy(g_roi + (size_t)r * w, g_mp[bb.index][0] + (size_t)(y0 - 1 + r) * g_gw + (x0 - 1), w);
 		}
+		hae_step(g_mp[bb.index][0], g_gw, g_gh);
 		ioctl(g_fd, VIDIOC_QBUF, &bb);                                   // buffer back to the driver before any arithmetic
 		if (have) { int w = x1 - x0 + 2, h = y1 - y0 + 2; sh += sharpness_blocks(g_roi, w, 1, w - 1, 1, h - 1); got++; }
 	}
@@ -519,12 +547,17 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_AF_LAT")) g_af_lat = atoi(getenv("A7Z_AF_LAT"));
 	if (getenv("A7Z_RMUL")) g_rmul = atof(getenv("A7Z_RMUL"));
 	if (getenv("A7Z_BMUL")) g_bmul = atof(getenv("A7Z_BMUL"));
+	if (getenv("A7Z_HAE")) g_hae = 1;
+	if (getenv("A7Z_HAE_LOG")) g_hae_log = 1;
+	if (getenv("A7Z_HAE_TARGET")) g_hae_target = atof(getenv("A7Z_HAE_TARGET"));
+	if (getenv("A7Z_HAE_CLIP")) g_hae_clip = atof(getenv("A7Z_HAE_CLIP"));
 	if (getenv("A7Z_MAXEXP")) g_maxexp = atoi(getenv("A7Z_MAXEXP"));
 	if (getenv("A7Z_MAXGAIN")) g_maxgain = atoi(getenv("A7Z_MAXGAIN"));
 	if (getenv("A7Z_AF_EXPDIV")) g_af_expdiv = atoi(getenv("A7Z_AF_EXPDIV"));
 	if (getenv("A7Z_AF_GAINMAX")) g_af_gainmax = atoi(getenv("A7Z_AF_GAINMAX"));
 	if (getenv("A7Z_AF_SKIP")) g_af_skip = atoi(getenv("A7Z_AF_SKIP"));
 	if (getenv("A7Z_AF_PROBE")) af_probe();
+	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_AF")) { grab_sharp(12, 0); autofocus(1); }   // let exposure/gain settle first: the first frames are noisy and fool the sweep
 	if (getenv("A7Z_FOCUS")) {                       // hold the lens at a fixed code for the whole capture
 		int sfd2 = open("/dev/v4l-subdev0", O_RDWR);
@@ -577,6 +610,7 @@ int main(int argc, char **argv)
 		b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; b.memory = V4L2_MEMORY_MMAP;
 		b.length = np; b.m.planes = pl;
 		if (xioctl(fd, VIDIOC_DQBUF, &b, "DQBUF")) break;
+		hae_step(mp[b.index][0], gw, gh);
 		int every = getenv("A7Z_EVERY") ? atoi(getenv("A7Z_EVERY")) : 10;
 		if (getenv("A7Z_STDOUT")) {            // live stream: raw planar YUV420 frames to stdout, every A7Z_SKIP-th frame
 			int skip = getenv("A7Z_SKIP") ? atoi(getenv("A7Z_SKIP")) : 2;
@@ -599,8 +633,8 @@ int main(int argc, char **argv)
 		}
 		if (g_block_isp_lens) {
 			// refocus watcher: every 3rd frame, score a cached copy of the centre region (never the uncached buffer itself), hand the buffer back first
-			static int low = 0, since = 0, rebase = 4, tick = 0, skipcheck = 0;
-			int x0 = gw / 4, x1 = gw * 3 / 4, y0 = gh / 4, y1 = gh * 3 / 4, rw = x1 - x0 + 2, rh = y1 - y0 + 2, docheck = (++tick % 3) == 0;
+			static int low = 0, since = 0, rebase = 4, tick = 0, skipcheck = 0, futile = 0;
+			int x0 = gw / 4, x1 = gw * 3 / 4, y0 = gh / 4, y1 = gh * 3 / 4, rw = x1 - x0 + 2, rh = y1 - y0 + 2, docheck = (++tick % 2) == 0;
 			if (docheck) {
 				if ((size_t)rw * rh > g_roi_cap) { g_roi_cap = (size_t)rw * rh; g_roi = realloc(g_roi, g_roi_cap); }
 				for (int r = 0; r < rh; r++) memcpy(g_roi + (size_t)r * rw, mp[b.index][0] + (size_t)(y0 - 1 + r) * gw + (x0 - 1), rw);
@@ -616,11 +650,12 @@ int main(int argc, char **argv)
 				if (rebase > 0) { g_af_peak = cur; rebase--; low = 0; skipcheck = 1; }     // right after a focus run the reference is what the settled picture measures
 				double ratio = g_af_peak > 0 ? cur / g_af_peak : 1.0;
 				since++;
-				low = (ratio < 0.95 || ratio > 1.2) ? low + 1 : 0;                         // softer, or more detailed (scene changed); sensitive because real defocus moves a flat-ish curve only ~10-30%
-				if (!skipcheck && ratio >= 0.95 && ratio <= 1.2) g_af_peak += (cur > g_af_peak ? 0.05 : 0.002) * (cur - g_af_peak);   // follows an increase quickly, a decrease only very slowly, so a real (shallow) defocus is not tracked away   // follow slow drift without chasing a real defocus
+				double lowthr = futile > 0 ? 0.85 : 0.95; if (futile > 0) futile--;                  // after a refocus that barely moved the lens, only a clear drop re-triggers (the picture was already in the depth of field)
+				low = (ratio < lowthr || ratio > 1.2) ? low + 1 : 0;                         // softer, or more detailed (scene changed); sensitive because real defocus moves a flat-ish curve only ~10-30%
+				if (!skipcheck && ratio >= lowthr && ratio <= 1.2) g_af_peak += (cur > g_af_peak ? 0.05 : 0.002) * (cur - g_af_peak);   // follows an increase quickly, a decrease only very slowly, so a real (shallow) defocus is not tracked away   // follow slow drift without chasing a real defocus
 				skipcheck = 0;
 				if (getenv("A7Z_AF_DEBUG") && since % 5 == 0) fprintf(stderr, "[a7zcap] AF watch: sharpness %.2f ref %.2f ratio %.2f low=%d\n", cur, g_af_peak, ratio, low);
-				if (low >= 4 && since > 10) { struct timespec ta; clock_gettime(CLOCK_MONOTONIC, &ta); fprintf(stderr, "[a7zcap] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; rebase = 4; if (g_td_set) { struct timespec te; clock_gettime(CLOCK_MONOTONIC, &te); fprintf(stderr, "[a7zcap] TEST: recovered to %.2f dpt, %.2f s after the defocus\n", g_af_dpt, (te.tv_sec - g_td.tv_sec) + (te.tv_nsec - g_td.tv_nsec) * 1e-9); g_td_set = 0; } }
+				if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10) { double dpt0 = g_af_dpt; struct timespec ta; clock_gettime(CLOCK_MONOTONIC, &ta); fprintf(stderr, "[a7zcap] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; rebase = 4; futile = fabs(g_af_dpt - dpt0) < 0.2 ? 45 : 0; if (g_td_set) { struct timespec te; clock_gettime(CLOCK_MONOTONIC, &te); fprintf(stderr, "[a7zcap] TEST: recovered to %.2f dpt, %.2f s after the defocus\n", g_af_dpt, (te.tv_sec - g_td.tv_sec) + (te.tv_nsec - g_td.tv_nsec) * 1e-9); g_td_set = 0; } }
 			}
 			continue;
 		}
