@@ -26,7 +26,7 @@ driver's overlay.
 | Hardware-ISP frames (YUV420) | yes, 1920x1080 and 2328x1748 at 30 fps, **3264x2448 at ~13 fps** |
 | **Full 16 MP through the ISP** | **yes, 4656x3496 at 9.4 fps (`A7Z_FPS=9`) or 15 fps (`A7Z_FPS=15`)**, and 3840x2160 at 18 fps, using the vendor 2-in-1 mode, see below (and [What was tested](#what-was-tested-and-what-that-does-not-show)) |
 | Colour | white balance, CCM and black level tuned against a displayed 24-patch chart (see `tuning/`) |
-| Autofocus | own userspace contrast-detect AF (libisp's own AF never focuses on this module): in `a7zcap`, and in the `a7zdual` live preview (`A7Z_AF=1`). The preview's AF was checked by eye on the 3840x2160 view only |
+| Autofocus | own userspace contrast-detect AF (libisp's own AF never focuses on this module), modelled on the Raspberry Pi libcamera search: a lens sweep in dioptre space, then 3 settled samples and a parabola. In `a7zcap` and in the `a7zdual` live preview (`A7Z_AF=1`). `a7zcap`: image-scored 10-cycle runs land on the sharpest lens position with no early stops, 34-38 frames per focus (the wall-clock time is 3 s or ~10 s because libisp sets a 100 ms or 400 ms frame period on its own; not controllable from here). `A7Z_AF_CDAF=1` selects the plain libcamera-style stepper (72 frames, can stop early in dim scenes). The preview version was checked on a bottle 15 cm away (4 runs, 6.1-6.8 dioptre) |
 | Lens driver | `ak7375_act.c` + a fix for a mutex that Radxa's `actuator.c` never releases (hangs the process in D state) |
 
 ## What does not work (yet)

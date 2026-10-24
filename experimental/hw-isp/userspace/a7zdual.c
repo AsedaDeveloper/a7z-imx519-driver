@@ -78,20 +78,55 @@ static double grab_sharp(int skip, int avg)
 	}
 	return got ? sh / got : -1.0;
 }
-static void af_scan(int lo, int hi, int step)
+// Sweep autofocus (same as a7zcap's): dioptre-space contrast search after Raspberry Pi's libcamera af.cpp. The coarse stage sweeps the lens one 0.75-dioptre step per frame
+// (no settling wait) and credits each frame's sharpness to the lens position commanded 3 frames earlier (measured pipeline latency); the sweep stops once the peak is
+// prominent (>= 1.4x the weakest sample) and two frames in a row are below 60% of it. Then 3 settled samples at +-0.3 dioptre and a parabola. ~270 lens codes per dioptre.
+#define AF_CODE_PER_DPT 273.0
+#define AF_DPT_MAX 12.0
+#define AF_LAT 3
+static double g_af_dpt = 0.0;
+static int af_code(double dpt) { if (dpt < 0) dpt = 0; if (dpt > AF_DPT_MAX) dpt = AF_DPT_MAX; return (int)(dpt * AF_CODE_PER_DPT + 0.5); }
+static double af_at(double dpt) { set_lens(af_code(dpt)); return grab_sharp(3, 1); }
+static double af_peak(const double *f, const double *c, int n, int i)
 {
-	double best = -1; int bc = lo;
-	for (int c = lo; c <= hi; c += step) { set_lens(c); double sh = grab_sharp(5, 1); if (sh > best) { best = sh; bc = c; } }
-	g_af_peak = best; g_af_code = bc;
+	double r = f[i];
+	if (n >= 3) {
+		if (i == 0) i++; else if (i + 1 >= n) i--;
+		double abx = f[i - 1] - f[i], aby = c[i - 1] - c[i], cbx = f[i + 1] - f[i], cby = c[i + 1] - c[i];
+		double den = 2.0 * (aby * cbx - cby * abx);
+		if (fabs(den) >= 1.0 / 64.0 && den * abx > 0.0) {
+			r = (aby * cbx * cbx - cby * abx * abx) / den;
+			double lo = abx < cbx ? abx : cbx, hi = abx > cbx ? abx : cbx; if (r < lo) r = lo; if (r > hi) r = hi;
+			r += f[i];
+		}
+	}
+	return r;
 }
 static void autofocus(int full)
 {
-	int c0 = 0, c1 = 3000, st = 200;
-	if (!full) { c0 = g_af_code - 400; c1 = g_af_code + 400; st = 100; if (c0 < 0) c0 = 0; if (c1 > 4000) c1 = 4000; }
-	af_scan(c0, c1, st);
-	int c = g_af_code; af_scan(c - st < 0 ? 0 : c - st, c + st > 4000 ? 4000 : c + st, st / 5 > 10 ? st / 5 : 10);
-	set_lens(g_af_code); double v = grab_sharp(5, 3);
-	fprintf(stderr, "[dual] AF: best lens code %d, sharpness %.2f\n", g_af_code, v); g_af_peak = v;
+	const double step = 0.75, fine = 0.3;
+	double pos[80], f[80], c[80]; int m = 0, mi = 0, below = 0;
+	double start = full ? 0.0 : (g_af_dpt - 2.0 < 0 ? 0.0 : g_af_dpt - 2.0);
+	set_lens(af_code(start)); grab_sharp(3, 1);
+	for (int i = 0; i < 79; i++) {
+		double d = start + i * step; if (d > AF_DPT_MAX + step) break;
+		pos[i] = d; set_lens(af_code(d)); double v = grab_sharp(0, 1);
+		int j = i - AF_LAT; if (j < 0) continue;
+		f[m] = pos[j]; c[m] = v; if (c[m] > c[mi]) mi = m; m++;
+		double lo = c[0]; for (int k = 1; k < m; k++) if (c[k] < lo) lo = c[k];
+		if (m >= 4 && c[mi] >= 1.25 * lo && c[m - 1] < lo + 0.5 * (c[mi] - lo)) { if (++below >= 2) break; } else below = 0;   // the decimated preview metric has a high noise floor: judge the drop against the range, not zero
+	}
+	if (getenv("A7Z_AF_DEBUG")) { for (int k = 0; k < m; k++) fprintf(stderr, "[dual] sweep %.2f dpt: %.2f\n", f[k], c[k]); }
+	double pk = af_peak(f, c, m, mi);
+	double ff[3], fs[3]; int fi = 0;
+	for (int k = 0; k < 3; k++) {
+		double d = pk - fine + k * fine; if (d < 0) d = 0; if (d > AF_DPT_MAX) d = AF_DPT_MAX;
+		ff[k] = d; fs[k] = af_at(d); if (fs[k] > fs[fi]) fi = k;
+	}
+	double best = af_peak(ff, fs, 3, fi);
+	set_lens(af_code(best));
+	g_af_dpt = best; g_af_code = af_code(best); g_af_peak = fs[fi];
+	fprintf(stderr, "[dual] AF: best lens code %d (%.2f dioptre), sharpness %.2f\n", g_af_code, best, g_af_peak);
 }
 
 

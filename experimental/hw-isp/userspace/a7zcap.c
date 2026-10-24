@@ -66,22 +66,36 @@ static void dump_live_param(void)
 
 // ---- lens ownership: when A7Z_AF is set, libisp's lens commands are swallowed so only our own autofocus moves the lens ----
 static volatile int g_block_isp_lens = 0;
+static volatile int g_in_af = 0;
+static int g_af_expdiv = 1, g_af_gainmax = 256;   // A7Z_AF_EXPDIV / A7Z_AF_GAINMAX: exposure cap during autofocus
 static __thread int g_my_lens_call = 0;
 int ioctl(int fd, unsigned long req, ...)
 {
 	static int (*real_ioctl)(int, unsigned long, ...) = NULL;
 	if (!real_ioctl) real_ioctl = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
 	va_list ap; va_start(ap, req); void *arg = va_arg(ap, void *); va_end(ap);
+	if (g_in_af && getenv("A7Z_IOCTL_LOG") && req != VIDIOC_DQBUF && req != VIDIOC_QBUF) { unsigned *u = (unsigned *)arg; fprintf(stderr, "[a7zcap] IOCTL fd=%d req=%lx a=%08x %08x %08x %08x\n", fd, req, arg ? u[0] : 0, arg ? u[1] : 0, arg ? u[2] : 0, arg ? u[3] : 0); }
+	if (req == VIDIOC_VIN_SENSOR_EXP_GAIN && arg) {
+		struct sensor_exp_gain *eg = (struct sensor_exp_gain *)arg;
+		if (g_af_expdiv > 1 && g_in_af && eg->gain_val > 0) {    // autofocus only: shorter exposure (faster frames), gain raised to keep the brightness
+			int g = eg->gain_val * g_af_expdiv; if (g > g_af_gainmax) g = g_af_gainmax;
+			if (g > eg->gain_val) { eg->exp_val = (int)((long long)eg->exp_val * eg->gain_val / g); eg->gain_val = g; }
+		}
+		if (getenv("A7Z_EXPLOG")) fprintf(stderr, "[a7zcap] EXPGAIN exp=%d gain=%d r=%d b=%d\n", eg->exp_val, eg->gain_val, eg->r_gain, eg->b_gain);
+	}
 	if (g_block_isp_lens && !g_my_lens_call && (req == VIDIOC_VIN_ACT_SET_CODE || req == VIDIOC_VIN_ACT_INIT)) return 0;
 	return real_ioctl(fd, req, arg);
 }
 static int g_sfd = -1, g_fd = -1, g_np = 3, g_gw = 1920, g_gh = 1080;
 static void *g_mp[8][3];
+static double g_lens_ms = 0; static int g_lens_calls = 0;
 static void set_lens(int code)
 {
-	if (g_sfd < 0) return;
+	if (g_sfd < 0 || getenv("A7Z_AF_NOLENS")) return;
 	struct actuator_ctrl ac = { .code = (unsigned)code };
+	struct timespec ta, tb; clock_gettime(CLOCK_MONOTONIC, &ta);
 	g_my_lens_call = 1; ioctl(g_sfd, VIDIOC_VIN_ACT_SET_CODE, &ac); g_my_lens_call = 0;
+	clock_gettime(CLOCK_MONOTONIC, &tb); g_lens_ms += (tb.tv_sec - ta.tv_sec) * 1e3 + (tb.tv_nsec - ta.tv_nsec) * 1e-6; g_lens_calls++;
 }
 
 // --- focus sweep: A7Z_SWEEP="start,end,step"  (lens codes), prints sharpness per code
@@ -96,6 +110,7 @@ static double sharpness(const unsigned char *y, int stride, int x0, int x1, int 
 	return acc / (double)n;
 }
 
+static long g_af_frames = 0; static int g_af_trace = 0;
 static double grab_sharp(int skip, int avg)
 {
 	double sh = 0; int got = 0;
@@ -105,6 +120,8 @@ static double grab_sharp(int skip, int avg)
 		struct v4l2_buffer bb; struct v4l2_plane pp[3]; memset(&bb, 0, sizeof bb); memset(pp, 0, sizeof pp);
 		bb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; bb.memory = V4L2_MEMORY_MMAP; bb.length = g_np; bb.m.planes = pp;
 		if (ioctl(g_fd, VIDIOC_DQBUF, &bb) < 0) break;
+		g_af_frames++;
+		if (g_af_trace) { struct timespec tq; clock_gettime(CLOCK_MONOTONIC, &tq); fprintf(stderr, "%ld ", (long)(tq.tv_sec % 100 * 1000 + tq.tv_nsec / 1000000)); }
 		if (n >= skip) { sh += sharpness(g_mp[bb.index][0], g_gw, g_gw / 4, g_gw * 3 / 4, g_gh / 4, g_gh * 3 / 4); got++; }
 		ioctl(g_fd, VIDIOC_QBUF, &bb);
 	}
@@ -120,7 +137,7 @@ static void af_scan(int lo, int hi, int step)
 	}
 	g_af_peak = best; g_af_code = bc;
 }
-static void autofocus(int full)
+static void autofocus_slow(int full)
 {
 	int c0 = 0, c1 = 3000, st = 150;
 	if (!full) { c0 = g_af_code - 400; c1 = g_af_code + 400; st = 50; if (c0 < 0) c0 = 0; if (c1 > 4000) c1 = 4000; }
@@ -128,6 +145,108 @@ static void autofocus(int full)
 	int c = g_af_code; af_scan(c - st < 0 ? 0 : c - st, c + st > 4000 ? 4000 : c + st, st / 5 > 5 ? st / 5 : 5);
 	set_lens(g_af_code); double v = grab_sharp(6, 4);
 	fprintf(stderr, "[a7zcap] AF: best lens code %d, sharpness %.2f\n", g_af_code, v); g_af_peak = v;
+}
+
+
+// ---- faster autofocus (default; A7Z_AF_SLOW=1 keeps the old fixed 0-3000 scan). Follows the contrast-detect scan of Raspberry Pi's libcamera
+// (src/ipa/rpi/controller/rpi/af.cpp, doScan/findPeak) and the imx519 tuning file's rpi.af values: work in dioptres (the tuning map is 0 -> code 0,
+// 15 dioptre -> code 4095, i.e. ~273 codes per dioptre), start at the far end, step 1.0 dioptre toward near, STOP as soon as the contrast falls below
+// 75% of the best seen (the peak has been passed), then take 3 fine samples at 0.25 dioptre around the interpolated peak and fit a parabola.
+// A7Z_AF_SKIP = frames discarded after each lens move (default 4; probe: the first 3 frames still show the old focus; the Pi tuning uses 5; run A7Z_AF_PROBE=1 to measure what this pipeline needs).
+static int g_af_skip = 3;   // settle frames after a fine-scan lens move (a move shows on the 4th frame; image-scored equal to 4)
+static double g_af_dpt = 0.0;
+#define AF_CODE_PER_DPT 273.0
+#define AF_DPT_MAX 12.0
+static int af_code(double dpt) { if (dpt < 0) dpt = 0; if (dpt > AF_DPT_MAX) dpt = AF_DPT_MAX; return (int)(dpt * AF_CODE_PER_DPT + 0.5); }
+static double af_at(double dpt) { set_lens(af_code(dpt)); return grab_sharp(g_af_skip, 1); }
+// parabola through sample i and its two neighbours (the same-side pair at the ends), clamped between them; falls back to the sample itself
+static double af_peak(const double *f, const double *c, int n, int i)
+{
+	double r = f[i];
+	if (n >= 3) {
+		if (i == 0) i++; else if (i + 1 >= n) i--;
+		double abx = f[i - 1] - f[i], aby = c[i - 1] - c[i], cbx = f[i + 1] - f[i], cby = c[i + 1] - c[i];
+		double den = 2.0 * (aby * cbx - cby * abx);
+		if (fabs(den) >= 1.0 / 64.0 && den * abx > 0.0) {
+			r = (aby * cbx * cbx - cby * abx * abx) / den;
+			double lo = abx < cbx ? abx : cbx, hi = abx > cbx ? abx : cbx; if (r < lo) r = lo; if (r > hi) r = hi;
+			r += f[i];
+		}
+	}
+	return r;
+}
+static void autofocus_fast(int full)
+{
+	struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); long f0 = g_af_frames;
+	const double coarse = 1.0, fine = 0.25, ratio = 0.75;
+	double fo[40], sh[40]; int n = 0, mi = 0;
+	double start = full ? 0.0 : (g_af_dpt - 2.0 < 0 ? 0.0 : g_af_dpt - 2.0);
+	for (double d = start; d <= AF_DPT_MAX + 1e-6 && n < 40; d += coarse) {
+		fo[n] = d; sh[n] = af_at(d); if (sh[n] > sh[mi]) mi = n; n++;
+		if (n >= 2 && sh[n - 1] < ratio * sh[mi]) break;          // peak passed
+	}
+	double pk = af_peak(fo, sh, n, mi);
+	double ff[3], fs[3]; int fi = 0;
+	for (int k = 0; k < 3; k++) {                                // fine scan around the coarse peak: pk+fine, pk, pk-fine
+		double d = pk + fine - k * fine; if (d < 0) d = 0; if (d > AF_DPT_MAX) d = AF_DPT_MAX;
+		ff[k] = d; fs[k] = af_at(d); if (fs[k] > fs[fi]) fi = k;
+	}
+	double best = af_peak(ff, fs, 3, fi);
+	set_lens(af_code(best)); double v = grab_sharp(g_af_skip, 3);
+	if (v < 0.9 * fs[fi]) { best = ff[fi]; set_lens(af_code(best)); v = grab_sharp(g_af_skip, 3); }   // interpolated point worse than a measured one
+	g_af_dpt = best; g_af_code = af_code(best); g_af_peak = v;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	fprintf(stderr, "[a7zcap] AF: best lens code %d (%.2f dioptre), sharpness %.2f (fast: %ld frames, %.1f s)\n", g_af_code, best, v, g_af_frames - f0, (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
+}
+
+// ---- sweep autofocus (default): same dioptre-space contrast search as above but the coarse stage SWEEPS the lens (one step per frame, no settling wait) and
+// assigns each frame's sharpness to the lens position commanded g_af_lat frames earlier (measured pipeline latency: a move shows on the 4th frame). The peak must be
+// prominent (>= 1.4x the weakest sample) and the sharpness must stay below 60% of it for two frames before the sweep stops, so noise bumps in the dim, flat
+// far end no longer end it early. Then 3 settled fine samples around the peak and a parabola; no verify capture. A7Z_AF_CDAF=1 -> the libcamera-style stepper above.
+static int g_af_lat = 3;
+static void autofocus_sweep(int full)
+{
+	struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); long f0 = g_af_frames;
+	const double step = getenv("A7Z_AF_STEP") ? atof(getenv("A7Z_AF_STEP")) : 0.75, fine = getenv("A7Z_AF_FINE") ? atof(getenv("A7Z_AF_FINE")) : 0.3;
+	double pos[80], val[80], f[80], c[80]; int n = 0, m = 0, mi = 0, below = 0;
+	double start = full ? 0.0 : (g_af_dpt - 2.0 < 0 ? 0.0 : g_af_dpt - 2.0);
+	set_lens(af_code(start)); grab_sharp(g_af_skip, 1);                       // settle at the start of the sweep
+	for (int i = 0; i < 79; i++) {
+		double d = start + i * step; if (d > AF_DPT_MAX + step) break;
+		pos[i] = d; set_lens(af_code(d)); val[i] = grab_sharp(0, 1); n = i + 1;
+		int j = i - g_af_lat;                                                     // this frame shows the lens as commanded at frame j
+		if (j < 0) continue;
+		f[m] = pos[j]; c[m] = val[i]; if (c[m] > c[mi]) mi = m; m++;
+		double lo = c[0]; for (int k = 1; k < m; k++) if (c[k] < lo) lo = c[k];
+		if (m >= 4 && c[mi] >= 1.4 * lo && c[m - 1] < 0.6 * c[mi]) { if (++below >= 2) break; } else below = 0;
+	}
+	double pk = af_peak(f, c, m, mi);
+	double ff[3], fs[3]; int fi = 0;
+	for (int k = 0; k < 3; k++) {
+		double d = pk - fine + k * fine; if (d < 0) d = 0; if (d > AF_DPT_MAX) d = AF_DPT_MAX;
+		ff[k] = d; fs[k] = af_at(d); if (fs[k] > fs[fi]) fi = k;
+	}
+	double best = af_peak(ff, fs, 3, fi);
+	set_lens(af_code(best));
+	g_af_dpt = best; g_af_code = af_code(best); g_af_peak = fs[fi];
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	fprintf(stderr, "[a7zcap] AF: best lens code %d (%.2f dioptre), sharpness %.2f (sweep: %ld frames, %.1f s, sweep peak %.2f dpt, prominence %.1fx, lens ioctl %.0f ms avg over %d)\n",
+		g_af_code, best, fs[fi], g_af_frames - f0, (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9, f[mi], c[mi] / (c[0] > 0.01 ? c[0] : 0.01), g_lens_calls ? g_lens_ms / g_lens_calls : 0.0, g_lens_calls);
+	(void)n;
+}
+static void autofocus_dispatch(int full);
+static void autofocus(int full) { g_in_af = 1; autofocus_dispatch(full); g_in_af = 0; }
+static void autofocus_dispatch(int full) { if (getenv("A7Z_AF_SLOW")) autofocus_slow(full); else if (getenv("A7Z_AF_CDAF")) autofocus_fast(full); else autofocus_sweep(full); }
+
+// A7Z_AF_PROBE=1: how many frames after a lens move until the sharpness settles? Jumps the lens 0 -> 1500 -> 0 and prints sharpness per frame.
+static void af_probe(void)
+{
+	int seq[3] = { 0, 1500, 0 };
+	for (int j = 0; j < 3; j++) {
+		set_lens(seq[j]); fprintf(stderr, "[a7zcap] PROBE lens -> %d: sharpness per frame:", seq[j]);
+		for (int k = 0; k < 14; k++) fprintf(stderr, " %.2f", grab_sharp(0, 1));
+		fprintf(stderr, "\n");
+	}
 }
 
 // ---- lens-shading (flat-field) correction applied to output frames: A7Z_FLAT=/path/flatmap.bin (3 planes R,G,B of 36x64 float gains, linear light) ----
@@ -271,6 +390,12 @@ int main(int argc, char **argv)
 
 
 
+	g_af_trace = getenv("A7Z_AF_TRACE") != NULL;
+	if (getenv("A7Z_AF_LAT")) g_af_lat = atoi(getenv("A7Z_AF_LAT"));
+	if (getenv("A7Z_AF_EXPDIV")) g_af_expdiv = atoi(getenv("A7Z_AF_EXPDIV"));
+	if (getenv("A7Z_AF_GAINMAX")) g_af_gainmax = atoi(getenv("A7Z_AF_GAINMAX"));
+	if (getenv("A7Z_AF_SKIP")) g_af_skip = atoi(getenv("A7Z_AF_SKIP"));
+	if (getenv("A7Z_AF_PROBE")) af_probe();
 	if (getenv("A7Z_AF")) autofocus(1);
 	if (getenv("A7Z_FOCUS")) {                       // hold the lens at a fixed code for the whole capture
 		int sfd2 = open("/dev/v4l-subdev0", O_RDWR);
