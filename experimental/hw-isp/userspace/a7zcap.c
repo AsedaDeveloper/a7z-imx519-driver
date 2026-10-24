@@ -633,7 +633,7 @@ int main(int argc, char **argv)
 		}
 		if (g_block_isp_lens) {
 			// refocus watcher: every 3rd frame, score a cached copy of the centre region (never the uncached buffer itself), hand the buffer back first
-			static int low = 0, since = 0, rebase = 4, tick = 0, skipcheck = 0, futile = 0;
+			static int low = 0, since = 0, rebase = 4, tick = 0, skipcheck = 0, futile = 0, defer = 0, nh = 0; static double hist[6];
 			int x0 = gw / 4, x1 = gw * 3 / 4, y0 = gh / 4, y1 = gh * 3 / 4, rw = x1 - x0 + 2, rh = y1 - y0 + 2, docheck = (++tick % 2) == 0;
 			if (docheck) {
 				if ((size_t)rw * rh > g_roi_cap) { g_roi_cap = (size_t)rw * rh; g_roi = realloc(g_roi, g_roi_cap); }
@@ -650,12 +650,16 @@ int main(int argc, char **argv)
 				if (rebase > 0) { g_af_peak = cur; rebase--; low = 0; skipcheck = 1; }     // right after a focus run the reference is what the settled picture measures
 				double ratio = g_af_peak > 0 ? cur / g_af_peak : 1.0;
 				since++;
-				double lowthr = futile > 0 ? 0.85 : 0.95; if (futile > 0) futile--;                  // after a refocus that barely moved the lens, only a clear drop re-triggers (the picture was already in the depth of field)
+				hist[nh++ % 6] = cur;                                                                           // last 6 checks (~0.4 s): is the scene still moving?
+				double hmin = 1e9, hmax = 0; int hn = nh < 3 ? nh : 3; for (int i = 0; i < hn; i++) { double h = hist[(nh - 1 - i) % 6]; if (h < hmin) hmin = h; if (h > hmax) hmax = h; }   // last 3 only: a defocus is a step (settles at once), a moving subject keeps fluctuating
+				double spread = hn >= 3 ? (hmax - hmin) / (0.5 * (hmax + hmin) + 1e-9) : 0.0;
+				double lowthr = futile > 0 ? 0.80 : 0.90; if (futile > 0) futile--;                  // after a refocus that barely moved the lens, only a clear drop re-triggers (the picture was already in the depth of field)
 				low = (ratio < lowthr || ratio > 1.2) ? low + 1 : 0;                         // softer, or more detailed (scene changed); sensitive because real defocus moves a flat-ish curve only ~10-30%
 				if (!skipcheck && ratio >= lowthr && ratio <= 1.2) g_af_peak += (cur > g_af_peak ? 0.05 : 0.002) * (cur - g_af_peak);   // follows an increase quickly, a decrease only very slowly, so a real (shallow) defocus is not tracked away   // follow slow drift without chasing a real defocus
 				skipcheck = 0;
 				if (getenv("A7Z_AF_DEBUG") && since % 5 == 0) fprintf(stderr, "[a7zcap] AF watch: sharpness %.2f ref %.2f ratio %.2f low=%d\n", cur, g_af_peak, ratio, low);
-				if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10) { double dpt0 = g_af_dpt; struct timespec ta; clock_gettime(CLOCK_MONOTONIC, &ta); fprintf(stderr, "[a7zcap] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; rebase = 4; futile = fabs(g_af_dpt - dpt0) < 0.2 ? 45 : 0; if (g_td_set) { struct timespec te; clock_gettime(CLOCK_MONOTONIC, &te); fprintf(stderr, "[a7zcap] TEST: recovered to %.2f dpt, %.2f s after the defocus\n", g_af_dpt, (te.tv_sec - g_td.tv_sec) + (te.tv_nsec - g_td.tv_nsec) * 1e-9); g_td_set = 0; } }
+				if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10 && spread > 0.12 && defer < 30) { defer++; if (defer == 1 && getenv("A7Z_AF_DEBUG")) fprintf(stderr, "[a7zcap] AF: scene still moving (spread %.2f), waiting for it to settle\n", spread); }   // a sweep on a moving subject picks a wrong peak: wait (max ~2 s)
+			else if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10) { defer = 0; double dpt0 = g_af_dpt; struct timespec ta; clock_gettime(CLOCK_MONOTONIC, &ta); fprintf(stderr, "[a7zcap] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; rebase = 4; futile = fabs(g_af_dpt - dpt0) < 0.2 ? 45 : 0; if (g_td_set) { struct timespec te; clock_gettime(CLOCK_MONOTONIC, &te); fprintf(stderr, "[a7zcap] TEST: recovered to %.2f dpt, %.2f s after the defocus\n", g_af_dpt, (te.tv_sec - g_td.tv_sec) + (te.tv_nsec - g_td.tv_nsec) * 1e-9); g_td_set = 0; } }
 			}
 			continue;
 		}
