@@ -15,6 +15,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 ## B. Make it a proper camera device, stability, hardware blocks, tuning
 ### B-1 Standard interfaces
 - [ ] B1 Standard V4L2 + media-controller node (sensor, ISP, lens) so GStreamer / ffmpeg / OpenCV work directly, not only through `a7zcap` / `a7zdual`
+- [ ] B19 Standard apps get ISP-processed, autofocused frames with no custom tool: `cv2.VideoCapture(0)`, GStreamer `v4l2src`, `ffmpeg -f v4l2`, `v4l2-ctl` (focus / exposure / white-balance controls) and a Picamera2-style Python API. Needs B1, B2 and the ISP running as a daemon (libisp must be started by something); done when one test script passes with each of them (B1 is the V4L2 node itself, B19 is the acceptance test)
 - [ ] B2 Lens as a standard V4L2 control (`FOCUS_ABSOLUTE`) instead of vendor ioctls
 - [ ] B3 Device-tree overlay and a service so it works after every boot with no manual steps
 ### B-2 Stability
