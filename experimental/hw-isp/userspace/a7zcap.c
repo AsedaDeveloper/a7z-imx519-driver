@@ -69,6 +69,8 @@ static void dump_live_param(void)
 // ---- lens ownership: when A7Z_AF is set, libisp's lens commands are swallowed so only our own autofocus moves the lens ----
 static volatile int g_block_isp_lens = 0;
 static volatile int g_in_af = 0;
+static double g_rmul = 1.0, g_bmul = 1.0;   // A7Z_RMUL / A7Z_BMUL: scale the ISP's final white-balance gains (r_gain/b_gain) on their way to the driver
+static int g_maxexp = 0, g_maxgain = 512;   // A7Z_MAXEXP (us) / A7Z_MAXGAIN: global exposure cap for a smooth frame rate in dim light
 static int g_af_expdiv = 1, g_af_gainmax = 256;   // A7Z_AF_EXPDIV / A7Z_AF_GAINMAX: exposure cap during autofocus
 static __thread int g_my_lens_call = 0;
 int ioctl(int fd, unsigned long req, ...)
@@ -83,6 +85,11 @@ int ioctl(int fd, unsigned long req, ...)
 			int g = eg->gain_val * g_af_expdiv; if (g > g_af_gainmax) g = g_af_gainmax;
 			if (g > eg->gain_val) { eg->exp_val = (int)((long long)eg->exp_val * eg->gain_val / g); eg->gain_val = g; }
 		}
+		if (g_maxexp > 0 && eg->exp_val > g_maxexp && eg->gain_val > 0) {    // dim light: trade exposure for gain so frames keep coming at full rate
+			long long g = (long long)eg->gain_val * eg->exp_val / g_maxexp; if (g > g_maxgain) g = g_maxgain;
+			if (g > eg->gain_val) { eg->exp_val = (int)((long long)eg->exp_val * eg->gain_val / g); eg->gain_val = (int)g; }
+		}
+		if (g_rmul != 1.0 || g_bmul != 1.0) { eg->r_gain = (int)(eg->r_gain * g_rmul + 0.5); eg->b_gain = (int)(eg->b_gain * g_bmul + 0.5); }
 		if (getenv("A7Z_EXPLOG")) fprintf(stderr, "[a7zcap] EXPGAIN exp=%d gain=%d r=%d b=%d\n", eg->exp_val, eg->gain_val, eg->r_gain, eg->b_gain);
 	}
 	if (g_block_isp_lens && !g_my_lens_call && (req == VIDIOC_VIN_ACT_SET_CODE || req == VIDIOC_VIN_ACT_INIT)) return 0;
@@ -127,6 +134,18 @@ static void pin_big_core(void)
 	cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
 	if (sched_setaffinity(0, sizeof set, &set) == 0) fprintf(stderr, "[a7zcap] pinned to cpu %d\n", cpu);
 }
+
+// Focus score: the region is cut into an 8x6 grid, each block scored by mean |Laplacian|, and the mean of the best quarter is used. A plain mean over the whole region is
+// diluted by flat background (a 1 dioptre defocus moved it only ~8% on a bottle), the best-quarter mean follows the textured part that actually goes soft.
+static int cmp_dbl(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return x < y ? 1 : x > y ? -1 : 0; }
+static double sharpness_blocks(const unsigned char *y, int stride, int x0, int x1, int y0, int y1)
+{
+	double sc[48]; int k = 0, bw = (x1 - x0) / 8, bh = (y1 - y0) / 6;
+	for (int by = 0; by < 6; by++) for (int bx = 0; bx < 8; bx++) sc[k++] = sharpness(y, stride, x0 + bx * bw, x0 + (bx + 1) * bw, y0 + by * bh, y0 + (by + 1) * bh);
+	qsort(sc, 48, sizeof sc[0], cmp_dbl);
+	double a = 0; for (int i = 0; i < 12; i++) a += sc[i];
+	return a / 12.0;
+}
 static long g_af_frames = 0; static int g_af_trace = 0;
 // The capture buffers are uncached DMA memory: reading them pixel by pixel from the CPU is slow (and on a little core it made each AF frame take 100-400 ms, so
 // the driver dropped 1 frame in 2 to 1 in 8). Copy the region once with row memcpy, hand the buffer back, then score the cached copy.
@@ -149,7 +168,7 @@ static double grab_sharp(int skip, int avg)
 			for (int r = 0; r < h; r++) memcpy(g_roi + (size_t)r * w, g_mp[bb.index][0] + (size_t)(y0 - 1 + r) * g_gw + (x0 - 1), w);
 		}
 		ioctl(g_fd, VIDIOC_QBUF, &bb);                                   // buffer back to the driver before any arithmetic
-		if (have) { int w = x1 - x0 + 2, h = y1 - y0 + 2; sh += sharpness(g_roi, w, 1, w - 1, 1, h - 1); got++; }
+		if (have) { int w = x1 - x0 + 2, h = y1 - y0 + 2; sh += sharpness_blocks(g_roi, w, 1, w - 1, 1, h - 1); got++; }
 	}
 	return got ? sh / got : -1.0;
 }
@@ -179,7 +198,7 @@ static void autofocus_slow(int full)
 // 15 dioptre -> code 4095, i.e. ~273 codes per dioptre), start at the far end, step 1.0 dioptre toward near, STOP as soon as the contrast falls below
 // 75% of the best seen (the peak has been passed), then take 3 fine samples at 0.25 dioptre around the interpolated peak and fit a parabola.
 // A7Z_AF_SKIP = frames discarded after each lens move (default 4; probe: the first 3 frames still show the old focus; the Pi tuning uses 5; run A7Z_AF_PROBE=1 to measure what this pipeline needs).
-static int g_af_skip = 3;   // settle frames after a fine-scan lens move (a move shows on the 4th frame; image-scored equal to 4)
+static int g_af_skip = 2;   // settle frames after a fine-scan lens move (a move shows on the 4th frame; image-scored equal to 4)
 static double g_af_dpt = 0.0;
 #define AF_CODE_PER_DPT 273.0
 #define AF_DPT_MAX 12.0
@@ -229,6 +248,7 @@ static void autofocus_fast(int full)
 // assigns each frame's sharpness to the lens position commanded g_af_lat frames earlier (measured pipeline latency, see g_af_lat). The peak must be
 // prominent (>= 1.4x the weakest sample) and the sharpness must stay below 60% of it for two frames before the sweep stops, so noise bumps in the dim, flat
 // far end no longer end it early. Then 3 settled fine samples around the peak and a parabola; no verify capture. A7Z_AF_CDAF=1 -> the libcamera-style stepper above.
+static struct timespec g_td; static int g_td_set = 0;
 static int g_af_nostop = 0;   // set for the retry sweep: no early stop, scan the whole range
 static int g_af_lat = 1;   // frames between a lens command and the frame that shows it; measured 1 at the undropped 50 ms frame rate (was 3 when the old CPU-bound loop dropped frames)
 static void autofocus_sweep(int full)
@@ -237,9 +257,10 @@ static void autofocus_sweep(int full)
 	const double step = getenv("A7Z_AF_STEP") ? atof(getenv("A7Z_AF_STEP")) : 0.75, fine = getenv("A7Z_AF_FINE") ? atof(getenv("A7Z_AF_FINE")) : 0.3;
 	double pos[80], val[80], f[80], c[80]; int n = 0, m = 0, mi = 0, below = 0;
 	double start = full ? 0.0 : (g_af_dpt - 2.0 < 0 ? 0.0 : g_af_dpt - 2.0);
+	double send = full ? AF_DPT_MAX + step : (start + 4.5 > AF_DPT_MAX ? AF_DPT_MAX : start + 4.5);   // refocus: sweep only +-2 dioptre around the last focus
 	set_lens(af_code(start)); grab_sharp(g_af_skip, 1);                       // settle at the start of the sweep
 	for (int i = 0; i < 79; i++) {
-		double d = start + i * step; if (d > AF_DPT_MAX + step) break;
+		double d = start + i * step; if (d > send) break;
 		pos[i] = d; set_lens(af_code(d)); val[i] = grab_sharp(0, 1); n = i + 1;
 		int j = i - g_af_lat;                                                     // this frame shows the lens as commanded at frame j
 		if (j < 0) continue;
@@ -253,6 +274,10 @@ static void autofocus_sweep(int full)
 	for (int k = 0; k < 3; k++) {
 		double d = pk - fine + k * fine; if (d < 0) d = 0; if (d > AF_DPT_MAX) d = AF_DPT_MAX;
 		ff[k] = d; fs[k] = af_at(d); if (fs[k] > fs[fi]) fi = k;
+	}
+	if (!full && !g_af_nostop && (mi == 0 || mi == m - 1)) {                      // peak on the edge of the local window: the subject moved further than +-2 dioptre
+		fprintf(stderr, "[a7zcap] AF: local sweep peaked at the window edge (%.2f dpt), sweeping the full range\n", f[mi]);
+		autofocus_sweep(1); return;
 	}
 	if (!g_af_nostop && ((mi == 0 && m >= 4) || fs[fi] < 0.8 * c[mi] || getenv("A7Z_AF_FORCE_RETRY"))) {          // suspicious: peak at the start of the sweep, or the settled samples are far below the sweep's best
 		fprintf(stderr, "[a7zcap] AF: suspicious result (sweep peak %.2f dpt, settled %.3f vs sweep %.3f), redoing a full sweep\n", f[mi], fs[fi], c[mi]);
@@ -333,6 +358,73 @@ static void apply_flat(const unsigned char *Y, const unsigned char *U, const uns
 			g_fv[by * cw + bx] = (unsigned char)(nv < 0 ? 0 : nv > 255 ? 255 : nv + 0.5f);
 		}
 	(void)rows;
+}
+
+// ---- live-stream downscale (A7Z_STREAM_D=n): the USB link carries only ~10 MB/s, i.e. ~3 fps of raw 1080p. The planes are copied row by row into cached memory
+//      (reading the uncached DMA buffers pixel by pixel is slow), then box-averaged n x n. Output is exactly (gw/n)x(gh/n) planar YUV420 with no padding rows.
+static unsigned char *g_sy, *g_su, *g_sv, *g_oy, *g_ou, *g_ov;
+// ---- software white balance for the preview (A7Z_SWAWB=1): libisp's AWB swings with whatever fills the frame (a green wall pulls greys to R/G 0.4), and its gains cannot be overridden.
+//      Here the cast is estimated from near-neutral pixels (a chroma gate that follows the previous estimate, so a large coloured wall is not mistaken for the illuminant),
+//      smoothed over frames, and applied as per-channel gains in linear light. Works on the downscaled planar YUV420 (full range, BT.601) just before it is written.
+static double g_wb_cu = 0, g_wb_cv = 0, g_wb_y = 120; static float g_wb_gr = 1, g_wb_gb = 1; static int g_wb_n = 0;
+static float g_lin8[256], *g_enc12;
+static void swawb(unsigned char *Y, unsigned char *U, unsigned char *V, int ow, int oh)
+{
+	int cw = ow / 2, ch = oh / 2;
+	if (!g_enc12) { g_enc12 = malloc(4097 * sizeof(float)); for (int i = 0; i < 256; i++) g_lin8[i] = powf(i / 255.f, 2.2f); for (int i = 0; i <= 4096; i++) g_enc12[i] = 255.f * powf(i / 4096.f, 1 / 2.2f); }
+	// 1. estimate: mean chroma / luma of pixels inside the gate around the previous estimate
+	double su = 0, sv = 0, sy = 0; long n = 0; const double R2 = 28.0 * 28.0;
+	for (int j = 0; j < ch; j += 2) for (int i = 0; i < cw; i += 2) {
+		int u = U[j * cw + i] - 128, v = V[j * cw + i] - 128, y = Y[2 * j * ow + 2 * i];
+		if (y < 45 || y > 235) continue;
+		double du = u - g_wb_cu, dv = v - g_wb_cv; if (du * du + dv * dv > R2) continue;
+		su += u; sv += v; sy += y; n++;
+	}
+	if (n > (long)(cw / 2) * (ch / 2) / 40) {      // enough neutral-ish pixels: move the estimate (slowly) and recompute the gains
+		double cu = su / n, cv = sv / n, yy = sy / n, a = g_wb_n++ ? 0.12 : 1.0;
+		g_wb_cu += a * (cu - g_wb_cu); g_wb_cv += a * (cv - g_wb_cv); g_wb_y += a * (yy - g_wb_y);
+		double r0 = g_wb_y + 1.402 * g_wb_cv, g0 = g_wb_y - 0.344136 * g_wb_cu - 0.714136 * g_wb_cv, b0 = g_wb_y + 1.772 * g_wb_cu;
+		if (r0 < 8) r0 = 8; if (g0 < 8) g0 = 8; if (b0 < 8) b0 = 8;
+		double lr = pow(r0 / 255.0, 2.2), lg = pow(g0 / 255.0, 2.2), lb = pow(b0 / 255.0, 2.2);
+		float gr = (float)(lg / lr), gb = (float)(lg / lb); if (gr < 0.5f) gr = 0.5f; if (gr > 3.f) gr = 3.f; if (gb < 0.5f) gb = 0.5f; if (gb > 3.f) gb = 3.f;
+		g_wb_gr = gr; g_wb_gb = gb;
+	}
+	if (getenv("A7Z_SWAWB_LOG") && (g_wb_n % 30) == 1) fprintf(stderr, "[a7zcap] SWAWB gate n=%ld cast U%+.1f V%+.1f gains R %.2f B %.2f\n", n, g_wb_cu, g_wb_cv, g_wb_gr, g_wb_gb);
+	// 2. apply (per pixel, shared chroma of the 2x2 block)
+	for (int j = 0; j < ch; j++) for (int i = 0; i < cw; i++) {
+		float u = U[j * cw + i] - 128.f, v = V[j * cw + i] - 128.f, sU = 0, sV = 0;
+		for (int dy = 0; dy < 2; dy++) for (int dx = 0; dx < 2; dx++) {
+			unsigned char *py = &Y[(2 * j + dy) * ow + 2 * i + dx]; float y = *py;
+			float r = y + 1.402f * v, g = y - 0.344136f * u - 0.714136f * v, b = y + 1.772f * u;
+			int ri = r < 0 ? 0 : r > 255 ? 255 : (int)(r + .5f), gi = g < 0 ? 0 : g > 255 ? 255 : (int)(g + .5f), bi = b < 0 ? 0 : b > 255 ? 255 : (int)(b + .5f);
+			float lr = g_lin8[ri] * g_wb_gr, lg = g_lin8[gi], lb = g_lin8[bi] * g_wb_gb;
+			int qr = (int)(lr * 4096.f); if (qr > 4096) qr = 4096; int qg = (int)(lg * 4096.f); int qb = (int)(lb * 4096.f); if (qb > 4096) qb = 4096;
+			float R = g_enc12[qr], G = g_enc12[qg], B = g_enc12[qb];
+			float ny = 0.299f * R + 0.587f * G + 0.114f * B;
+			*py = (unsigned char)(ny < 0 ? 0 : ny > 255 ? 255 : ny + .5f);
+			sU += (B - ny) * 0.564f; sV += (R - ny) * 0.713f;
+		}
+		float nu = sU * 0.25f + 128.f, nv = sV * 0.25f + 128.f;
+		U[j * cw + i] = (unsigned char)(nu < 0 ? 0 : nu > 255 ? 255 : nu + .5f); V[j * cw + i] = (unsigned char)(nv < 0 ? 0 : nv > 255 ? 255 : nv + .5f);
+	}
+}
+static void emit_scaled(FILE *f, void *const planes[3], int gw, int gh, int D)
+{
+	int cw = gw / 2, ch = gh / 2, ow = (gw / D) & ~1, oh = (gh / D) & ~1, ocw = ow / 2, och = oh / 2;
+	if (!g_sy) { g_sy = malloc((size_t)gw * gh); g_su = malloc((size_t)cw * ch); g_sv = malloc((size_t)cw * ch); g_oy = malloc((size_t)ow * oh); g_ou = malloc((size_t)ocw * och); g_ov = malloc((size_t)ocw * och); }
+	for (int r = 0; r < gh; r++) memcpy(g_sy + (size_t)r * gw, (unsigned char *)planes[0] + (size_t)r * gw, gw);
+	for (int r = 0; r < ch; r++) { memcpy(g_su + (size_t)r * cw, (unsigned char *)planes[1] + (size_t)r * cw, cw); memcpy(g_sv + (size_t)r * cw, (unsigned char *)planes[2] + (size_t)r * cw, cw); }
+	int n2 = D * D;
+	for (int j = 0; j < oh; j++) for (int i = 0; i < ow; i++) {
+		int a = 0; for (int dy = 0; dy < D; dy++) { const unsigned char *p = g_sy + (size_t)(j * D + dy) * gw + i * D; for (int dx = 0; dx < D; dx++) a += p[dx]; }
+		g_oy[j * ow + i] = (unsigned char)(a / n2);
+	}
+	for (int j = 0; j < och; j++) for (int i = 0; i < ocw; i++) {
+		int au = 0, av = 0; for (int dy = 0; dy < D; dy++) { size_t o = (size_t)(j * D + dy) * cw + i * D; for (int dx = 0; dx < D; dx++) { au += g_su[o + dx]; av += g_sv[o + dx]; } }
+		g_ou[j * ocw + i] = (unsigned char)(au / n2); g_ov[j * ocw + i] = (unsigned char)(av / n2);
+	}
+	if (getenv("A7Z_SWAWB")) swawb(g_oy, g_ou, g_ov, ow, oh);
+	fwrite(g_oy, 1, (size_t)ow * oh, f); fwrite(g_ou, 1, (size_t)ocw * och, f); fwrite(g_ov, 1, (size_t)ocw * och, f);
 }
 static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *pl, size_t ml0, int np, int gw, int gh)
 {
@@ -425,11 +517,15 @@ int main(int argc, char **argv)
 
 	g_af_trace = getenv("A7Z_AF_TRACE") != NULL;
 	if (getenv("A7Z_AF_LAT")) g_af_lat = atoi(getenv("A7Z_AF_LAT"));
+	if (getenv("A7Z_RMUL")) g_rmul = atof(getenv("A7Z_RMUL"));
+	if (getenv("A7Z_BMUL")) g_bmul = atof(getenv("A7Z_BMUL"));
+	if (getenv("A7Z_MAXEXP")) g_maxexp = atoi(getenv("A7Z_MAXEXP"));
+	if (getenv("A7Z_MAXGAIN")) g_maxgain = atoi(getenv("A7Z_MAXGAIN"));
 	if (getenv("A7Z_AF_EXPDIV")) g_af_expdiv = atoi(getenv("A7Z_AF_EXPDIV"));
 	if (getenv("A7Z_AF_GAINMAX")) g_af_gainmax = atoi(getenv("A7Z_AF_GAINMAX"));
 	if (getenv("A7Z_AF_SKIP")) g_af_skip = atoi(getenv("A7Z_AF_SKIP"));
 	if (getenv("A7Z_AF_PROBE")) af_probe();
-	if (getenv("A7Z_AF")) autofocus(1);
+	if (getenv("A7Z_AF")) { grab_sharp(12, 0); autofocus(1); }   // let exposure/gain settle first: the first frames are noisy and fool the sweep
 	if (getenv("A7Z_FOCUS")) {                       // hold the lens at a fixed code for the whole capture
 		int sfd2 = open("/dev/v4l-subdev0", O_RDWR);
 		if (sfd2 >= 0) { struct actuator_ctrl ac2 = { .code = (unsigned)atoi(getenv("A7Z_FOCUS")) }; int rc2 = ioctl(sfd2, VIDIOC_VIN_ACT_SET_CODE, &ac2); fprintf(stderr, "[a7zcap] lens code %u rc=%d\n", ac2.code, rc2); close(sfd2); }
@@ -485,7 +581,9 @@ int main(int argc, char **argv)
 		if (getenv("A7Z_STDOUT")) {            // live stream: raw planar YUV420 frames to stdout, every A7Z_SKIP-th frame
 			int skip = getenv("A7Z_SKIP") ? atoi(getenv("A7Z_SKIP")) : 2;
 			if (n % skip == 0) {
-				emit_frame(outf, mp[b.index], pl, ml[b.index][0], np, gw, gh);
+				int sd = getenv("A7Z_STREAM_D") ? atoi(getenv("A7Z_STREAM_D")) : 1;
+				if (sd > 1 && np >= 3) emit_scaled(outf, mp[b.index], gw, gh, sd);
+				else emit_frame(outf, mp[b.index], pl, ml[b.index][0], np, gw, gh);
 				fflush(outf);
 			}
 		} else if (n == N - 1 || n % every == every - 1) {
@@ -500,11 +598,30 @@ int main(int argc, char **argv)
 			}
 		}
 		if (g_block_isp_lens) {
-			static int low = 0; static int since = 0; since++;
-			double cur = sharpness(mp[b.index][0], gw, gw / 4, gw * 3 / 4, gh / 4, gh * 3 / 4);
-			low = (cur < 0.7 * g_af_peak) ? low + 1 : 0;
+			// refocus watcher: every 3rd frame, score a cached copy of the centre region (never the uncached buffer itself), hand the buffer back first
+			static int low = 0, since = 0, rebase = 4, tick = 0, skipcheck = 0;
+			int x0 = gw / 4, x1 = gw * 3 / 4, y0 = gh / 4, y1 = gh * 3 / 4, rw = x1 - x0 + 2, rh = y1 - y0 + 2, docheck = (++tick % 3) == 0;
+			if (docheck) {
+				if ((size_t)rw * rh > g_roi_cap) { g_roi_cap = (size_t)rw * rh; g_roi = realloc(g_roi, g_roi_cap); }
+				for (int r = 0; r < rh; r++) memcpy(g_roi + (size_t)r * rw, mp[b.index][0] + (size_t)(y0 - 1 + r) * gw + (x0 - 1), rw);
+			}
 			xioctl(fd, VIDIOC_QBUF, &b, "QBUF");
-			if (low >= 30 && since > 60) { fprintf(stderr, "[a7zcap] AF: picture went soft (%.2f vs %.2f), refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; }
+			if (docheck && getenv("A7Z_AF_TEST_DEFOCUS") && since == 40) {          // test: knock the lens 1.5 dioptre out of focus on a still subject, time the recovery
+				static struct timespec td; clock_gettime(CLOCK_MONOTONIC, &td); g_td = td;
+				set_lens(af_code(g_af_dpt + atof(getenv("A7Z_AF_TEST_DEFOCUS")))); g_td_set = 1;
+				fprintf(stderr, "[a7zcap] TEST: lens knocked from %.2f dpt by %s dpt\n", g_af_dpt, getenv("A7Z_AF_TEST_DEFOCUS"));
+			}
+			if (docheck) {
+				double cur = sharpness_blocks(g_roi, rw, 1, rw - 1, 1, rh - 1);
+				if (rebase > 0) { g_af_peak = cur; rebase--; low = 0; skipcheck = 1; }     // right after a focus run the reference is what the settled picture measures
+				double ratio = g_af_peak > 0 ? cur / g_af_peak : 1.0;
+				since++;
+				low = (ratio < 0.95 || ratio > 1.2) ? low + 1 : 0;                         // softer, or more detailed (scene changed); sensitive because real defocus moves a flat-ish curve only ~10-30%
+				if (!skipcheck && ratio >= 0.95 && ratio <= 1.2) g_af_peak += (cur > g_af_peak ? 0.05 : 0.002) * (cur - g_af_peak);   // follows an increase quickly, a decrease only very slowly, so a real (shallow) defocus is not tracked away   // follow slow drift without chasing a real defocus
+				skipcheck = 0;
+				if (getenv("A7Z_AF_DEBUG") && since % 5 == 0) fprintf(stderr, "[a7zcap] AF watch: sharpness %.2f ref %.2f ratio %.2f low=%d\n", cur, g_af_peak, ratio, low);
+				if (low >= 4 && since > 10) { struct timespec ta; clock_gettime(CLOCK_MONOTONIC, &ta); fprintf(stderr, "[a7zcap] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; rebase = 4; if (g_td_set) { struct timespec te; clock_gettime(CLOCK_MONOTONIC, &te); fprintf(stderr, "[a7zcap] TEST: recovered to %.2f dpt, %.2f s after the defocus\n", g_af_dpt, (te.tv_sec - g_td.tv_sec) + (te.tv_nsec - g_td.tv_nsec) * 1e-9); g_td_set = 0; } }
+			}
 			continue;
 		}
 		xioctl(fd, VIDIOC_QBUF, &b, "QBUF");

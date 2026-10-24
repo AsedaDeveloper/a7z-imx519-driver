@@ -31,3 +31,10 @@ Mean over the cards: 0.70 -> 0.42. Converged by frame 39 in every run.
 * The CCMs (2800/4000/6500 K) were not touched.
 * Measured with a screen and one window-daylight reference, not with real lamps; the window light drifted during the session (the grey patch read blue, then orange).
 * The 1080p mode only; other modes have their own saved-state file.
+
+## v6 (Oct 24 2026): global trim
+Measured on an iPad colour chart that filled the frame (greys only, patch grid re-checked on every capture), v5 left a mild, steady cool cast: grey R/G 0.96, B/G 1.07-1.13.
+`tuning_v6.json` scales every light_rb entry (r x0.88, b x1.13): grey R/G 0.98-1.00, B/G 1.00-1.04. Red responds weakly to the table, blue strongly; more than ~x0.80 / x1.15 overshoots.
+A neutral-preserving 3x3 CCM fitted on top of v6 is ~identity (diag 1.02/1.0/1.03), so the CCMs are left alone.
+Dead ends: the r_gain/b_gain fields of the EXP_GAIN ioctl do not change the image; 3a ints 625/626 are not a final gain trim; the software preview AWB (`A7Z_SWAWB=1` in a7zcap) locks onto a large coloured wall, so it is off by default.
+Measured with an uncalibrated screen under one kind of light; check under daylight/lamps before trusting it elsewhere.

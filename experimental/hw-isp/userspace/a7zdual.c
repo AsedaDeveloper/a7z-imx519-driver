@@ -221,7 +221,7 @@ int main(int argc, char **argv)
 	enum v4l2_buf_type t = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	for (int i = 0; i < nodes; i++) if (xi(nd[i].fd, VIDIOC_STREAMON, &t, "STREAMON")) return 1;
 	if (af) autofocus(1);
-	int af_low = 0, af_since = 0;
+	int af_low = 0, af_since = 0, rebase = 4, continue_watch = 0;
 	int done = 0;
 	for (int iter = 0; iter < N * 10 && done < nodes; iter++) {
 		fd_set fds; FD_ZERO(&fds); int mx = 0;
@@ -247,9 +247,16 @@ int main(int argc, char **argv)
 			double cur = -1;
 			if (af && (nd[i].frames % 3) == 0) cur = sharp_dec(nd[i].mp[b.index][0], nd[i].w, nd[i].w, nd[i].h, g_d);
 			xi(nd[i].fd, VIDIOC_QBUF, &b, "QBUF");
-			if (cur >= 0) {                       // refocus when the picture has been soft for ~30 checks
-				af_since++; af_low = (cur < 0.7 * g_af_peak) ? af_low + 1 : 0;
-				if (af_low >= 30 && af_since > 40) { fprintf(stderr, "[dual] AF: picture went soft (%.2f vs %.2f), refocusing\n", cur, g_af_peak); autofocus(0); af_low = 0; af_since = 0; }
+			if (cur >= 0) {                       // refocus when the sharpness has moved away from its in-focus reference for ~8 checks (~1.6-2.4 s)
+				if (rebase > 0) { g_af_peak = cur; rebase--; af_low = 0; af_since++; continue_watch = 1; }    // right after a focus run: the reference is what the settled picture really measures
+				double ratio = g_af_peak > 0 ? cur / g_af_peak : 1.0;
+				if (!continue_watch) af_since++;
+				// two-sided: softer (defocused) OR much more detailed (scene changed, e.g. subject moved in or out of focus onto different content)
+				af_low = (ratio < 0.8 || ratio > 1.5) ? af_low + 1 : 0;
+				if (!continue_watch && ratio >= 0.8 && ratio <= 1.5) g_af_peak += 0.02 * (cur - g_af_peak);     // follow slow drift (light, exposure) without chasing a real defocus
+				continue_watch = 0;
+				if (getenv("A7Z_AF_DEBUG") && af_since % 5 == 0) fprintf(stderr, "[dual] AF watch: sharpness %.2f ref %.2f ratio %.2f low=%d\n", cur, g_af_peak, ratio, af_low);
+				if (af_low >= 8 && af_since > 15) { fprintf(stderr, "[dual] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(1); af_low = 0; af_since = 0; rebase = 4; }
 			}
 		}
 	}

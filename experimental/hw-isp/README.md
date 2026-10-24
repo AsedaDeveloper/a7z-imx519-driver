@@ -186,3 +186,8 @@ the same scene; frames keep arriving while the picture is damaged.
 
 GPL-2.0-or-later, like the rest of the repo. The kernel files derive from Allwinner/Radxa BSP sources (GPL) and the Raspberry Pi
 IMX519 driver; see their headers.
+
+### Preview / live-stream notes (Oct 24 2026)
+* `A7Z_STREAM_D=n` box-downscales the preview n x n (USB link ~10 MB/s: D=3 is 640x360 @ 30 fps, D=2 is 960x540 @ ~13 fps). The ISP output is full-range YUV: decode with `scale=in_range=pc`.
+* `A7Z_MAXEXP=<us>` caps exposure and raises gain instead (30000 keeps 30 fps in a dim room; more noise).
+* Autofocus watcher: block-based sharpness metric, local +-2 dpt sweep first (~0.6 s), full sweep on failure (~1 s), trigger below 0.95 / above 1.2 of the reference. `A7Z_AF_TEST_DEFOCUS=<dpt>` knocks the lens once to time the recovery.
