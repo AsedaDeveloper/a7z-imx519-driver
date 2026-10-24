@@ -19,7 +19,9 @@
 #include "sunxi_camera_v2.h"
 #include "AWIspApi.h"
 
+#ifndef NBUF
 #define NBUF 4
+#endif
 #define NPL 3
 
 static int xioctl(int fd, unsigned long req, void *arg, const char *name)
@@ -110,7 +112,25 @@ static double sharpness(const unsigned char *y, int stride, int x0, int x1, int 
 	return acc / (double)n;
 }
 
+
+// Run on a big core. The scheduler otherwise puts this process on a little core about half the time, which makes autofocus 3x slower. A7Z_CPU=n overrides (-1 = no pinning).
+#include <sched.h>
+static void pin_big_core(void)
+{
+	int cpu = getenv("A7Z_CPU") ? atoi(getenv("A7Z_CPU")) : -1;
+	if (!getenv("A7Z_CPU")) {                                           // pick the cores with the highest cpu_capacity
+		int best = 0, cap = 0, n = (int)sysconf(_SC_NPROCESSORS_ONLN);
+		for (int c = 0; c < n; c++) { char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpu_capacity", c); FILE *f = fopen(p, "r"); int v = 0; if (f) { if (fscanf(f, "%d", &v) != 1) v = 0; fclose(f); } if (v > cap) { cap = v; best = c; } }
+		cpu = cap ? best : -1;
+	}
+	if (cpu < 0) return;
+	cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
+	if (sched_setaffinity(0, sizeof set, &set) == 0) fprintf(stderr, "[a7zcap] pinned to cpu %d\n", cpu);
+}
 static long g_af_frames = 0; static int g_af_trace = 0;
+// The capture buffers are uncached DMA memory: reading them pixel by pixel from the CPU is slow (and on a little core it made each AF frame take 100-400 ms, so
+// the driver dropped 1 frame in 2 to 1 in 8). Copy the region once with row memcpy, hand the buffer back, then score the cached copy.
+static unsigned char *g_roi; static size_t g_roi_cap;
 static double grab_sharp(int skip, int avg)
 {
 	double sh = 0; int got = 0;
@@ -121,9 +141,15 @@ static double grab_sharp(int skip, int avg)
 		bb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; bb.memory = V4L2_MEMORY_MMAP; bb.length = g_np; bb.m.planes = pp;
 		if (ioctl(g_fd, VIDIOC_DQBUF, &bb) < 0) break;
 		g_af_frames++;
-		if (g_af_trace) { struct timespec tq; clock_gettime(CLOCK_MONOTONIC, &tq); fprintf(stderr, "%ld ", (long)(tq.tv_sec % 100 * 1000 + tq.tv_nsec / 1000000)); }
-		if (n >= skip) { sh += sharpness(g_mp[bb.index][0], g_gw, g_gw / 4, g_gw * 3 / 4, g_gh / 4, g_gh * 3 / 4); got++; }
-		ioctl(g_fd, VIDIOC_QBUF, &bb);
+		if (g_af_trace) { struct timespec tq; clock_gettime(CLOCK_MONOTONIC, &tq); fprintf(stderr, "%ld seq%u ts%ld ", (long)(tq.tv_sec % 100 * 1000 + tq.tv_nsec / 1000000), bb.sequence, (long)(bb.timestamp.tv_sec % 100 * 1000 + bb.timestamp.tv_usec / 1000)); }
+		int have = n >= skip, x0 = g_gw / 4, x1 = g_gw * 3 / 4, y0 = g_gh / 4, y1 = g_gh * 3 / 4;
+		if (have) {
+			int w = x1 - x0 + 2, h = y1 - y0 + 2;
+			if ((size_t)w * h > g_roi_cap) { g_roi_cap = (size_t)w * h; g_roi = realloc(g_roi, g_roi_cap); }
+			for (int r = 0; r < h; r++) memcpy(g_roi + (size_t)r * w, g_mp[bb.index][0] + (size_t)(y0 - 1 + r) * g_gw + (x0 - 1), w);
+		}
+		ioctl(g_fd, VIDIOC_QBUF, &bb);                                   // buffer back to the driver before any arithmetic
+		if (have) { int w = x1 - x0 + 2, h = y1 - y0 + 2; sh += sharpness(g_roi, w, 1, w - 1, 1, h - 1); got++; }
 	}
 	return got ? sh / got : -1.0;
 }
@@ -200,10 +226,11 @@ static void autofocus_fast(int full)
 }
 
 // ---- sweep autofocus (default): same dioptre-space contrast search as above but the coarse stage SWEEPS the lens (one step per frame, no settling wait) and
-// assigns each frame's sharpness to the lens position commanded g_af_lat frames earlier (measured pipeline latency: a move shows on the 4th frame). The peak must be
+// assigns each frame's sharpness to the lens position commanded g_af_lat frames earlier (measured pipeline latency, see g_af_lat). The peak must be
 // prominent (>= 1.4x the weakest sample) and the sharpness must stay below 60% of it for two frames before the sweep stops, so noise bumps in the dim, flat
 // far end no longer end it early. Then 3 settled fine samples around the peak and a parabola; no verify capture. A7Z_AF_CDAF=1 -> the libcamera-style stepper above.
-static int g_af_lat = 3;
+static int g_af_nostop = 0;   // set for the retry sweep: no early stop, scan the whole range
+static int g_af_lat = 1;   // frames between a lens command and the frame that shows it; measured 1 at the undropped 50 ms frame rate (was 3 when the old CPU-bound loop dropped frames)
 static void autofocus_sweep(int full)
 {
 	struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); long f0 = g_af_frames;
@@ -218,13 +245,18 @@ static void autofocus_sweep(int full)
 		if (j < 0) continue;
 		f[m] = pos[j]; c[m] = val[i]; if (c[m] > c[mi]) mi = m; m++;
 		double lo = c[0]; for (int k = 1; k < m; k++) if (c[k] < lo) lo = c[k];
-		if (m >= 4 && c[mi] >= 1.4 * lo && c[m - 1] < 0.6 * c[mi]) { if (++below >= 2) break; } else below = 0;
+		if (!g_af_nostop && m >= 4 && c[mi] >= 1.4 * lo && c[m - 1] < 0.6 * c[mi]) { if (++below >= 2) break; } else below = 0;
 	}
+	if (getenv("A7Z_AF_DEBUG")) { for (int k = 0; k < m; k++) fprintf(stderr, "[a7zcap] sweep %.2f dpt: %.3f\n", f[k], c[k]); }
 	double pk = af_peak(f, c, m, mi);
 	double ff[3], fs[3]; int fi = 0;
 	for (int k = 0; k < 3; k++) {
 		double d = pk - fine + k * fine; if (d < 0) d = 0; if (d > AF_DPT_MAX) d = AF_DPT_MAX;
 		ff[k] = d; fs[k] = af_at(d); if (fs[k] > fs[fi]) fi = k;
+	}
+	if (!g_af_nostop && ((mi == 0 && m >= 4) || fs[fi] < 0.8 * c[mi] || getenv("A7Z_AF_FORCE_RETRY"))) {          // suspicious: peak at the start of the sweep, or the settled samples are far below the sweep's best
+		fprintf(stderr, "[a7zcap] AF: suspicious result (sweep peak %.2f dpt, settled %.3f vs sweep %.3f), redoing a full sweep\n", f[mi], fs[fi], c[mi]);
+		g_af_nostop = 1; autofocus_sweep(1); g_af_nostop = 0; return;
 	}
 	double best = af_peak(ff, fs, 3, fi);
 	set_lens(af_code(best));
@@ -314,6 +346,7 @@ static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *
 
 int main(int argc, char **argv)
 {
+	pin_big_core();
 	if (argc < 5) { fprintf(stderr, "usage: %s W H NFRAMES PREFIX\n", argv[0]); return 2; }
 	int W = atoi(argv[1]), H = atoi(argv[2]), N = atoi(argv[3]);
 	FILE *outf = stdout;

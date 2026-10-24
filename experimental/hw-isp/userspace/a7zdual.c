@@ -36,6 +36,20 @@ static int xi(int fd, unsigned long r, void *a, const char *n) { int x = ioctl(f
 // ---- autofocus (A7Z_AF=1 together with A7Z_STREAM): libisp's own AF never focuses on this module, so its lens commands are swallowed
 //      (this program exports its own ioctl(); link with --export-dynamic) and the lens is moved by a contrast scan instead.
 //      Sharpness is scored on every d-th pixel of the central half of the frame, i.e. on the same decimated picture the preview shows.
+// Run on a big core. The scheduler otherwise puts this process on a little core about half the time, which makes autofocus 3x slower. A7Z_CPU=n overrides (-1 = no pinning).
+#include <sched.h>
+static void pin_big_core(void)
+{
+	int cpu = getenv("A7Z_CPU") ? atoi(getenv("A7Z_CPU")) : -1;
+	if (!getenv("A7Z_CPU")) {                                           // pick the cores with the highest cpu_capacity
+		int best = 0, cap = 0, n = (int)sysconf(_SC_NPROCESSORS_ONLN);
+		for (int c = 0; c < n; c++) { char p[96]; snprintf(p, sizeof p, "/sys/devices/system/cpu/cpu%d/cpu_capacity", c); FILE *f = fopen(p, "r"); int v = 0; if (f) { if (fscanf(f, "%d", &v) != 1) v = 0; fclose(f); } if (v > cap) { cap = v; best = c; } }
+		cpu = cap ? best : -1;
+	}
+	if (cpu < 0) return;
+	cpu_set_t set; CPU_ZERO(&set); CPU_SET(cpu, &set);
+	if (sched_setaffinity(0, sizeof set, &set) == 0) fprintf(stderr, "[dual] pinned to cpu %d\n", cpu);
+}
 static volatile int g_block_isp_lens = 0;
 static __thread int g_my_lens_call = 0;
 int ioctl(int fd, unsigned long req, ...)
@@ -83,7 +97,7 @@ static double grab_sharp(int skip, int avg)
 // prominent (>= 1.4x the weakest sample) and two frames in a row are below 60% of it. Then 3 settled samples at +-0.3 dioptre and a parabola. ~270 lens codes per dioptre.
 #define AF_CODE_PER_DPT 273.0
 #define AF_DPT_MAX 12.0
-#define AF_LAT 3
+static int AF_LAT = 3;   // frames between a lens command and the frame that shows it (env A7Z_AF_LAT)
 static double g_af_dpt = 0.0;
 static int af_code(double dpt) { if (dpt < 0) dpt = 0; if (dpt > AF_DPT_MAX) dpt = AF_DPT_MAX; return (int)(dpt * AF_CODE_PER_DPT + 0.5); }
 static double af_at(double dpt) { set_lens(af_code(dpt)); return grab_sharp(3, 1); }
@@ -182,6 +196,8 @@ static int setup(struct node *nd, int idx, int W, int H, int fps, int large, int
 
 int main(int argc, char **argv)
 {
+	pin_big_core();
+	if (getenv("A7Z_AF_LAT")) AF_LAT = atoi(getenv("A7Z_AF_LAT"));
 	if (argc < 5) { fprintf(stderr, "usage: %s W H N PREFIX\n", argv[0]); return 2; }
 	int W = atoi(argv[1]), H = atoi(argv[2]), N = atoi(argv[3]);
 	int fps = getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30, large = getenv("A7Z_LARGE") ? atoi(getenv("A7Z_LARGE")) : 3;
