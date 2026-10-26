@@ -20,7 +20,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] B3 Device-tree overlay and a service so it works after every boot with no manual steps (**found Oct 26**: the boot default had reverted to `l0`, which has no camera overlay, so the camera failed to probe; set back to `l0cam`, but u-boot-update can reset it again)
 ### B-2 Stability
 - [ ] B4 Dropped frames: cached buffers or DMA-buf, more queued buffers (VIN drops frames when userspace holds uncached buffers)
-- [ ] B5 Stall recovery watchdog, clean stream start/stop, verified power-up and reset order (**found Oct 26**: a failed encode wedges the video engine until `rmmod/modprobe sunxi_ve`; the watchdog should do this)
+- [x] B5 Stall recovery watchdog — `tools/a7zstream.sh` supervises a7zcap (exit 3 = encoder wedged -> reload `sunxi_ve`, exit 4 = capture stalled, other -> retry); verified by killing the process mid-stream and by a busy device. See STABILITY.md
 - [ ] B6 MIPI link margin: error counters, checks across lane speeds, CRC/ECC handling (link-damage metric exists)
 - [ ] B7 Soak tests and a regression script (hours-long runs, repeated start/stop, replug; log drops, fps, AF time, WB error)
 - [ ] B8 Exposure/gain latency compensation per sensor (settings take effect a couple of frames late)

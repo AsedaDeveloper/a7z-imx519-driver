@@ -465,7 +465,7 @@ static void emit_scaled(FILE *f, void *const planes[3], int gw, int gh, int D)
 //      multiple of 16 (the capture buffer is already 1088 rows, so 1080p encodes as 1088); bEncH264Nalu=0 gives Annex-B with inline SPS/PPS; above 1080p the
 //      engine times out (the vendor's own demoVencoder fails identically) and stays wedged until sunxi_ve is reloaded.
 static VideoEncoder *g_venc; static struct ScMemOpsS *g_encmem; static int g_enc_w, g_enc_h, g_enc_hdr;
-static VENC_CODEC_TYPE g_enc_codec;
+static VENC_CODEC_TYPE g_enc_codec; static int g_enc_fail = 0;
 static int enc_open(int w, int h)
 {
 	const char *cs = getenv("A7Z_ENC");
@@ -514,7 +514,12 @@ static void enc_frame(FILE *f, void *const planes[3], int gw, long long pts)
 	AddOneInputBuffer(g_venc, &ib);
 	int rc = VideoEncodeOneFrame(g_venc);
 	AlreadyUsedInputBuffer(g_venc, &ib); ReturnOneAllocInputBuffer(g_venc, &ib);
-	if (rc != 0) { fprintf(stderr, "[a7zcap] encode rc=%d\n", rc); return; }
+	if (rc != 0) {
+		fprintf(stderr, "[a7zcap] encode rc=%d\n", rc);
+		if (++g_enc_fail >= 5) { fprintf(stderr, "[a7zcap] encoder wedged (5 failures): exiting 3 so the supervisor can reload sunxi_ve\n"); fflush(stderr); _exit(3); }
+		return;
+	}
+	g_enc_fail = 0;
 	if (!g_enc_hdr) {                                          // SPS/PPS only exist once a frame has been encoded
 		VencHeaderData hd; memset(&hd, 0, sizeof hd);
 		int idx = (g_enc_codec == VENC_CODEC_H265) ? VENC_IndexParamH265Header : VENC_IndexParamH264SPSPPS;
@@ -681,7 +686,10 @@ int main(int argc, char **argv)
 		fd_set fds; FD_ZERO(&fds); FD_SET(fd, &fds);
 		struct timeval tv = { 3, 0 };
 		int s = select(fd + 1, &fds, NULL, NULL, &tv);
-		if (s <= 0) { fprintf(stderr, "[a7zcap] select timeout/err at frame %d\n", n); break; }
+		if (s <= 0) {                            // no frame for 3 s: the capture pipeline has stalled, not just a slow frame
+			fprintf(stderr, "[a7zcap] no frame for 3 s at frame %d: exiting 4 so the supervisor can restart the stream\n", n);
+			fflush(stderr); _exit(4);
+		}
 		memset(&b, 0, sizeof b); memset(pl, 0, sizeof pl);
 		b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; b.memory = V4L2_MEMORY_MMAP;
 		b.length = np; b.m.planes = pl;
@@ -699,6 +707,18 @@ int main(int argc, char **argv)
 			}
 		}
 		hae_step(mp[b.index][0], gw, gh);
+		if (getenv("A7Z_HEALTH")) {              // one line a second: frames, driver sequence gaps (dropped frames) and measured rate
+			static struct timespec hp; static int hn0; static unsigned hseq; static long hdrop;
+			struct timespec hnow; clock_gettime(CLOCK_MONOTONIC, &hnow);
+			if (hseq && b.sequence > hseq + 1) hdrop += b.sequence - hseq - 1;
+			hseq = b.sequence;
+			if (!hp.tv_sec) { hp = hnow; hn0 = n; }
+			double hel = (hnow.tv_sec - hp.tv_sec) + (hnow.tv_nsec - hp.tv_nsec) * 1e-9;
+			if (hel >= 1.0) {
+				fprintf(stderr, "[a7zcap] HEALTH frames=%d fps=%.1f seqdrops=%ld stale=%ld\n", n, (n - hn0) / hel, hdrop, g_stale);
+				fflush(stderr); hp = hnow; hn0 = n;
+			}
+		}
 		int every = getenv("A7Z_EVERY") ? atoi(getenv("A7Z_EVERY")) : 10;
 		if (getenv("A7Z_STDOUT")) {            // live stream: raw planar YUV420 frames to stdout, every A7Z_SKIP-th frame
 			int skip = getenv("A7Z_SKIP") ? atoi(getenv("A7Z_SKIP")) : 2;
