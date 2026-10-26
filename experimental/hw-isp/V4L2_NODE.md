@@ -49,8 +49,25 @@ with Camera() as cam:                 # /dev/video9, 1920x1080
 `cam.rgb()` returns an (h, w, 3) array when numpy is present. Measured on the board: **30 frames in 1.07 s = 28.1 fps** at 1080p, and the saved frame is a
 correct, in-focus picture.
 
-## Not yet proven (checklist B19)
-The acceptance test is ffmpeg, GStreamer, OpenCV and `v4l2-ctl` each reading this node. None of them can run here yet: the board has no network (wlan0 down,
-only the USB gadget link), `ffmpeg`, `gstreamer` and `cv2` are not installed, and this `v4l2-ctl` build was compiled without streaming support
-(`--stream-mmap` is not a recognised option). What is proven is that a standard single-planar V4L2 client reads the node correctly, which is the same code path
-those applications use. Finishing B19 needs packages on the board — internet sharing over the USB link, or hand-copied .debs.
+## Standard applications (checklist B19) — all four verified
+
+| tool | command | result |
+|---|---|---|
+| `v4l2-ctl` | `--stream-mmap=3 --stream-count=20 --stream-to=...` | 62,208,000 bytes = 20 x 1920x1080 YU12 |
+| ffmpeg | `-f v4l2 -video_size 1920x1080 -i /dev/video9` | h264 1920x1080, 20 frames |
+| GStreamer | `v4l2src device=/dev/video9 ! video/x-raw,format=I420 ! jpegenc ! multifilesink` | 20 JPEGs, 1920x1080 |
+| OpenCV | `cv2.VideoCapture(9)` | 20/20 frames, shape (1080, 1920, 3) |
+| Python, no deps | `python/a7z_v4l2.py` | 28.1 fps at 1080p |
+
+### Two things had to be fixed on the board first
+* **Debian 11 is end-of-life.** `/etc/apt/sources.list.d/50-bullseye-security.list` still pointed at `deb.debian.org/debian-security`, whose pool is gone, so every
+  install 404'd. Repointed at `archive.debian.org/debian-security` (original kept as `.bak`, plus `Acquire::Check-Valid-Until "false"`).
+* **Radxa's GStreamer build does not work with standard V4L2 devices.** `gstreamer1.0-plugins-good` 1.18.4-2+radxadeb11u2 patches `v4l2src` to issue the
+  sunxi-specific `VIDIOC_SET_DMA_MERGE` on open and to fail when it is not supported:
+  `v4l2_calls.c:579:gst_v4l2_open: VIDIOC_SET_DMA_MERGE error!` → "Failed to set pipeline to PAUSED". Installing Debian's stock
+  1.18.4-2+deb11u4 fixes it. To go back: `apt-get install --allow-downgrades gstreamer1.0-plugins-good=1.18.4-2+radxadeb11u2`.
+  A stale vendor package, `gstreamer1.0-plugins-rtp` 1.14.4.1, also breaks the plugin registry for the 1.18 stack
+  (`cannot register existing type 'GstRtpSrc'`); its `libgstnrtp.so` is moved aside to `/root/libgstnrtp.so.disabled`.
+
+The board has no network of its own. For these installs it was given temporary internet over the existing USB link with a reverse SOCKS proxy
+(`ssh -p 2222 -N -R 1080 radxa@127.0.0.1`, apt pointed at `socks5h://127.0.0.1:1080` in `/etc/apt/apt.conf.d/99socks`). It dies with the SSH session.
