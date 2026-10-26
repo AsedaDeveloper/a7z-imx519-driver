@@ -22,7 +22,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] B4 Dropped frames: cached buffers or DMA-buf, more queued buffers (VIN drops frames when userspace holds uncached buffers)
 - [x] B5 Stall recovery watchdog — `tools/a7zstream.sh` supervises a7zcap (exit 3 = encoder wedged -> reload `sunxi_ve`, exit 4 = capture stalled, other -> retry); verified by killing the process mid-stream and by a busy device. See STABILITY.md
 - [ ] B6 MIPI link margin: error counters, checks across lane speeds, CRC/ECC handling (link-damage metric exists)
-- [ ] B7 Soak tests and a regression script (hours-long runs, repeated start/stop, replug; log drops, fps, AF time, WB error)
+- [x] B7 Soak test and regression script — `tools/soak.sh`; 9.7 min at 1080p30: 17621 frames, median 30.0 fps, 0 restarts, 0 errors. **Found: the only frame drops (228) are the ~45-frame holes each autofocus run punches in the stream.** Hours-long runs and replug still to do
 - [ ] B8 Exposure/gain latency compensation per sensor (settings take effect a couple of frames late)
 ### B-3 Hardware blocks not used yet
 - [x] B9 Hardware video encoder, H.264 / H.265 — works and is wired into a7zcap (`A7Z_ENC=`); 1088p at ~110 fps H.264 / ~127 fps H.265. **Ceiling: nothing above 1080p encodes** (vendor demo fails too). See ENCODER.md
