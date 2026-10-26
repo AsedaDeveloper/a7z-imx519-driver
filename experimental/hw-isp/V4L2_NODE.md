@@ -37,6 +37,18 @@ sudo cp v4l2loopback.ko /lib/modules/$(uname -r)/extra/ && sudo depmod -a
 ```
 The module is third-party (github.com/umlaeute/v4l2loopback, v0.12.7) and is not vendored here.
 
+## Python with nothing installed
+`python/a7z_v4l2.py` speaks V4L2 straight to the kernel through `ioctl` and `mmap` — no OpenCV, no GStreamer, no bindings, standard library only:
+
+```python
+from a7z_v4l2 import Camera
+with Camera() as cam:                 # /dev/video9, 1920x1080
+    for y, u, v in cam.frames(10):
+        ...                           # Y is width*height bytes, already through the ISP
+```
+`cam.rgb()` returns an (h, w, 3) array when numpy is present. Measured on the board: **30 frames in 1.07 s = 28.1 fps** at 1080p, and the saved frame is a
+correct, in-focus picture.
+
 ## Not yet proven (checklist B19)
 The acceptance test is ffmpeg, GStreamer, OpenCV and `v4l2-ctl` each reading this node. None of them can run here yet: the board has no network (wlan0 down,
 only the USB gadget link), `ffmpeg`, `gstreamer` and `cv2` are not installed, and this `v4l2-ctl` build was compiled without streaming support
