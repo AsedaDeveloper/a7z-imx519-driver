@@ -24,7 +24,7 @@
 #include "AWIspApi.h"
 
 #ifndef NBUF
-#define NBUF 4
+#define NBUF 8        // deeper queue: autofocus spends ~25 ms/frame on scoring plus encoding, and a shallow queue turns any overrun into a dropped frame
 #endif
 #define NPL 3
 
@@ -74,6 +74,14 @@ static void dump_live_param(void)
 static volatile int g_block_isp_lens = 0;
 static volatile int g_in_af = 0;
 static int g_fresh = 0; static long g_stale = 0;   // A7Z_FRESH=1: drop frames the driver queued while we were busy, so the preview shows the newest one
+static FILE *g_outf = NULL; static long long g_pts_n = 0;   // set when streaming; autofocus keeps feeding it so a refocus does not stop the video
+static void stream_frame(void *const planes[3]);
+static unsigned g_seq_last; static long g_seq_drop; static long g_frames_out;   // drop accounting must span BOTH loops: autofocus dequeues frames too, and counting
+static void seq_track(unsigned seq)                                             // only the main loop's buffers made an autofocus sweep look like 45 dropped frames
+{
+	if (g_seq_last && seq > g_seq_last + 1) g_seq_drop += seq - g_seq_last - 1;
+	g_seq_last = seq;
+}
 static int g_hae = 0, g_hae_log = 0; static double g_hae_T = 0, g_hae_target = 118, g_hae_clip = 0.010;   // A7Z_HAE=1: highlight-aware exposure, replaces libisp's exposure request (it cannot be steered: target/bias controls are inert)
 static int g_hae_exp = 0, g_hae_gain = 0;
 static double g_rmul = 1.0, g_bmul = 1.0;   // A7Z_RMUL / A7Z_BMUL: scale the ISP's final white-balance gains (r_gain/b_gain) on their way to the driver
@@ -191,7 +199,7 @@ static double grab_sharp(int skip, int avg)
 		struct v4l2_buffer bb; struct v4l2_plane pp[3]; memset(&bb, 0, sizeof bb); memset(pp, 0, sizeof pp);
 		bb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; bb.memory = V4L2_MEMORY_MMAP; bb.length = g_np; bb.m.planes = pp;
 		if (ioctl(g_fd, VIDIOC_DQBUF, &bb) < 0) break;
-		g_af_frames++;
+		g_af_frames++; seq_track(bb.sequence);
 		if (g_af_trace) { struct timespec tq; clock_gettime(CLOCK_MONOTONIC, &tq); fprintf(stderr, "%ld seq%u ts%ld ", (long)(tq.tv_sec % 100 * 1000 + tq.tv_nsec / 1000000), bb.sequence, (long)(bb.timestamp.tv_sec % 100 * 1000 + bb.timestamp.tv_usec / 1000)); }
 		int have = n >= skip, x0 = g_gw / 4, x1 = g_gw * 3 / 4, y0 = g_gh / 4, y1 = g_gh * 3 / 4;
 		if (have) {
@@ -200,6 +208,7 @@ static double grab_sharp(int skip, int avg)
 			for (int r = 0; r < h; r++) memcpy(g_roi + (size_t)r * w, g_mp[bb.index][0] + (size_t)(y0 - 1 + r) * g_gw + (x0 - 1), w);
 		}
 		hae_step(g_mp[bb.index][0], g_gw, g_gh);
+		stream_frame(g_mp[bb.index]);                                    // keep the preview running through the sweep (copies out of the buffer, so before QBUF)
 		ioctl(g_fd, VIDIOC_QBUF, &bb);                                   // buffer back to the driver before any arithmetic
 		if (have) { int w = x1 - x0 + 2, h = y1 - y0 + 2; sh += sharpness_blocks(g_roi, w, 1, w - 1, 1, h - 1); got++; }
 	}
@@ -533,6 +542,16 @@ static void enc_frame(FILE *f, void *const planes[3], int gw, long long pts)
 		FreeOneBitStreamFrame(g_venc, &ob);
 	}
 }
+// Streaming must not stop while autofocus drives the lens: the sweep dequeues every frame anyway, so each one is encoded on its way past. Without this a refocus
+// left a ~1.5 s hole in the video and the driver dropped ~45 queued frames (measured: all 228 drops in a 9.7 min soak were autofocus holes).
+static void stream_frame(void *const planes[3])
+{
+	if (!g_venc || !g_outf) return;
+	int fps = getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30;
+	enc_frame(g_outf, planes, g_gw, g_pts_n++ * 1000000 / (fps ? fps : 30));
+	g_frames_out++;
+	fflush(g_outf);
+}
 static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *pl, size_t ml0, int np, int gw, int gh)
 {
 	size_t l0 = pl[0].bytesused ? pl[0].bytesused : ml0;
@@ -586,7 +605,9 @@ int main(int argc, char **argv)
 
 	struct v4l2_requestbuffers rb;
 	memset(&rb, 0, sizeof rb);
-	rb.count = NBUF; rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; rb.memory = V4L2_MEMORY_MMAP;
+	rb.count = getenv("A7Z_NBUF") ? atoi(getenv("A7Z_NBUF")) : NBUF;
+	if (rb.count > NBUF) rb.count = NBUF;        // only NBUF buffers are mmapped, and DQBUF may hand back any index the driver allocated
+	if (rb.count < 2) rb.count = 2; rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; rb.memory = V4L2_MEMORY_MMAP;
 	if (xioctl(fd, VIDIOC_REQBUFS, &rb, "REQBUFS")) return 1;
 
 	void *mp[NBUF][NPL]; size_t ml[NBUF][NPL];
@@ -637,6 +658,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_AF_SKIP")) g_af_skip = atoi(getenv("A7Z_AF_SKIP"));
 	if (getenv("A7Z_AF_PROBE")) af_probe();
 	if (getenv("A7Z_FRESH")) g_fresh = 1;
+	if (getenv("A7Z_STDOUT")) g_outf = outf;
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_AF")) { grab_sharp(12, 0); autofocus(1); }   // let exposure/gain settle first: the first frames are noisy and fool the sweep
@@ -706,17 +728,16 @@ int main(int argc, char **argv)
 				b = nb; memcpy(pl, np2, sizeof np2); g_stale++;
 			}
 		}
+		seq_track(b.sequence);
 		hae_step(mp[b.index][0], gw, gh);
 		if (getenv("A7Z_HEALTH")) {              // one line a second: frames, driver sequence gaps (dropped frames) and measured rate
-			static struct timespec hp; static int hn0; static unsigned hseq; static long hdrop;
+			static struct timespec hp; static long hf0;
 			struct timespec hnow; clock_gettime(CLOCK_MONOTONIC, &hnow);
-			if (hseq && b.sequence > hseq + 1) hdrop += b.sequence - hseq - 1;
-			hseq = b.sequence;
-			if (!hp.tv_sec) { hp = hnow; hn0 = n; }
+			if (!hp.tv_sec) { hp = hnow; hf0 = g_frames_out; }
 			double hel = (hnow.tv_sec - hp.tv_sec) + (hnow.tv_nsec - hp.tv_nsec) * 1e-9;
 			if (hel >= 1.0) {
-				fprintf(stderr, "[a7zcap] HEALTH frames=%d fps=%.1f seqdrops=%ld stale=%ld\n", n, (n - hn0) / hel, hdrop, g_stale);
-				fflush(stderr); hp = hnow; hn0 = n;
+				fprintf(stderr, "[a7zcap] HEALTH frames=%ld fps=%.1f seqdrops=%ld stale=%ld\n", g_frames_out, (g_frames_out - hf0) / hel, g_seq_drop, g_stale);
+				fflush(stderr); hp = hnow; hf0 = g_frames_out;
 			}
 		}
 		int every = getenv("A7Z_EVERY") ? atoi(getenv("A7Z_EVERY")) : 10;
@@ -724,7 +745,7 @@ int main(int argc, char **argv)
 			int skip = getenv("A7Z_SKIP") ? atoi(getenv("A7Z_SKIP")) : 2;
 			if (n % skip == 0) {
 				int sd = getenv("A7Z_STREAM_D") ? atoi(getenv("A7Z_STREAM_D")) : 1;
-				if (g_venc) enc_frame(outf, mp[b.index], gw, (long long)n * 1000000 / (getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30));
+				if (g_venc) stream_frame(mp[b.index]);
 				else if (sd > 1 && np >= 3) emit_scaled(outf, mp[b.index], gw, gh, sd);
 				else emit_frame(outf, mp[b.index], pl, ml[b.index][0], np, gw, gh);
 				fflush(outf);

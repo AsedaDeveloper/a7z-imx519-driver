@@ -19,10 +19,10 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] B2 Lens as a standard V4L2 control (`FOCUS_ABSOLUTE`) instead of vendor ioctls
 - [ ] B3 Device-tree overlay and a service so it works after every boot with no manual steps (**found Oct 26**: the boot default had reverted to `l0`, which has no camera overlay, so the camera failed to probe; set back to `l0cam`, but u-boot-update can reset it again)
 ### B-2 Stability
-- [ ] B4 Dropped frames: cached buffers or DMA-buf, more queued buffers (VIN drops frames when userspace holds uncached buffers)
+- [x] B4 Dropped frames — autofocus now encodes every frame it dequeues (no ~1.5 s hole per refocus) and the capture queue is 8 buffers deep (`A7Z_NBUF`): **0 dropped frames in 9.6 min at 1080p30 across 8 refocuses**. Cached buffers / DMA-buf not needed so far; revisit if a heavier consumer is added
 - [x] B5 Stall recovery watchdog — `tools/a7zstream.sh` supervises a7zcap (exit 3 = encoder wedged -> reload `sunxi_ve`, exit 4 = capture stalled, other -> retry); verified by killing the process mid-stream and by a busy device. See STABILITY.md
 - [ ] B6 MIPI link margin: error counters, checks across lane speeds, CRC/ECC handling (link-damage metric exists)
-- [x] B7 Soak test and regression script — `tools/soak.sh`; 9.7 min at 1080p30: 17621 frames, median 30.0 fps, 0 restarts, 0 errors. **Found: the only frame drops (228) are the ~45-frame holes each autofocus run punches in the stream.** Hours-long runs and replug still to do
+- [x] B7 Soak test and regression script — `tools/soak.sh`; 9.6 min at 1080p30 after the autofocus fix: 17900 frames, **min and median 30.0 fps, 0 dropped frames over 8 refocuses**, 0 restarts, 0 errors. Hours-long runs and replug still to do
 - [ ] B8 Exposure/gain latency compensation per sensor (settings take effect a couple of frames late)
 ### B-3 Hardware blocks not used yet
 - [x] B9 Hardware video encoder, H.264 / H.265 — works and is wired into a7zcap (`A7Z_ENC=`); 1088p at ~110 fps H.264 / ~127 fps H.265. **Ceiling: nothing above 1080p encodes** (vendor demo fails too). See ENCODER.md

@@ -40,5 +40,20 @@ second drops to 2.4-8.6. Nothing is dropped at any other time. The cause is stru
 frames, so for ~1.5 s nothing is encoded or streamed and the driver's queued buffers age out. Not a leak or an overrun — the stream is otherwise exactly 30.0 fps
 for 9.7 minutes.
 
-**To fix (not done):** encode and stream from inside the autofocus frame loop (`grab_sharp` already dequeues every frame — it could hand each one to the encoder),
-so a refocus costs sharpness, not a 1.5 s hole in the video.
+**Fixed Oct 26.** `grab_sharp` now hands every frame it dequeues to the encoder (`stream_frame`), so the video continues through a sweep; the capture queue went
+from 4 to 8 buffers (`A7Z_NBUF`) because scoring plus encoding costs ~25 ms a frame and a shallow queue turns any overrun into a drop.
+
+**Correction to the measurement above.** Part of the original 228 was an artifact: drop accounting only tracked buffers the *main* loop dequeued, so frames consumed
+by autofocus looked like sequence gaps. `seq_track()` is now called from both loops and the health counter reports every frame actually encoded.
+
+### Re-run after the fix: 9.6 min at 1080p30
+| | before | after |
+|---|---|---|
+| frames | 17621 | 17900 |
+| fps (min / median) | 2.4 / 30.0 | **30.0 / 30.0** |
+| one-second samples below 29 fps | 5 of 581 | **0 of 578** |
+| driver frame drops | 228 | **0** |
+| autofocus runs | 6 | 8 |
+| restarts / errors | 0 / 0 | 0 / 0 |
+
+Eight refocuses, no drop bursts, no dip below 30.0 fps.
