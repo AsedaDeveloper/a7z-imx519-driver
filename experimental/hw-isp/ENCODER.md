@@ -29,3 +29,12 @@ Live camera through the ISP (`a7zcap`, `A7Z_ENC=h264`): 300 frames of 1080p in 1
 A7Z_ENC=h264 A7Z_ENC_H=1080 A7Z_ENC_KBPS=6000 A7Z_STDOUT=1 A7Z_AF=1 A7Z_FPS=30 A7Z_MAXEXP=30000 a7zcap 1920 1080 100000000 x
 ```
 `A7Z_ENC` takes `h264`, `h265` or `jpeg`; `A7Z_ENC_KBPS` sets the bitrate (default 6000). `userspace/enctest.c` is the standalone encoder test (no camera).
+
+## Latency
+A raw H.264 pipe carries no timestamps, so a player guesses the frame rate. ffplay's guess paces slightly slow, it falls behind every second and the backlog grows
+without bound: measured **~1950 KB queued (~2.6 s at 6 Mbit/s) after 20 s**, with no frames dropped. Giving it the true rate fixes it — steady-state queue 0 KB:
+
+    ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext -probesize 32 -analyzeduration 0 -framerate 30 -f h264 -
+
+Frames leave the board at a steady 30.0 fps (median inter-frame gap 33.3 ms), so the link and the board add no growing delay. `A7Z_FRESH=1` additionally skips to the
+newest queued capture buffer if the driver got ahead (measured 0 stale frames at 1080p30, so it is insurance, not a fix). `tools/lv_enc.sh` has all of it.

@@ -73,6 +73,7 @@ static void dump_live_param(void)
 // ---- lens ownership: when A7Z_AF is set, libisp's lens commands are swallowed so only our own autofocus moves the lens ----
 static volatile int g_block_isp_lens = 0;
 static volatile int g_in_af = 0;
+static int g_fresh = 0; static long g_stale = 0;   // A7Z_FRESH=1: drop frames the driver queued while we were busy, so the preview shows the newest one
 static int g_hae = 0, g_hae_log = 0; static double g_hae_T = 0, g_hae_target = 118, g_hae_clip = 0.010;   // A7Z_HAE=1: highlight-aware exposure, replaces libisp's exposure request (it cannot be steered: target/bias controls are inert)
 static int g_hae_exp = 0, g_hae_gain = 0;
 static double g_rmul = 1.0, g_bmul = 1.0;   // A7Z_RMUL / A7Z_BMUL: scale the ISP's final white-balance gains (r_gain/b_gain) on their way to the driver
@@ -630,6 +631,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_AF_GAINMAX")) g_af_gainmax = atoi(getenv("A7Z_AF_GAINMAX"));
 	if (getenv("A7Z_AF_SKIP")) g_af_skip = atoi(getenv("A7Z_AF_SKIP"));
 	if (getenv("A7Z_AF_PROBE")) af_probe();
+	if (getenv("A7Z_FRESH")) g_fresh = 1;
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_AF")) { grab_sharp(12, 0); autofocus(1); }   // let exposure/gain settle first: the first frames are noisy and fool the sweep
@@ -684,6 +686,18 @@ int main(int argc, char **argv)
 		b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; b.memory = V4L2_MEMORY_MMAP;
 		b.length = np; b.m.planes = pl;
 		if (xioctl(fd, VIDIOC_DQBUF, &b, "DQBUF")) break;
+		if (g_fresh) {                 // live streaming: if the driver already has newer frames queued, skip to the newest. Otherwise every hiccup adds a frame of
+			for (;;) {                 // permanent delay, because DQBUF always hands back the oldest buffer.
+				fd_set f2; FD_ZERO(&f2); FD_SET(fd, &f2);
+				struct timeval z = { 0, 0 };
+				if (select(fd + 1, &f2, NULL, NULL, &z) <= 0) break;
+				struct v4l2_buffer nb; struct v4l2_plane np2[3]; memset(&nb, 0, sizeof nb); memset(np2, 0, sizeof np2);
+				nb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; nb.memory = V4L2_MEMORY_MMAP; nb.length = np; nb.m.planes = np2;
+				if (ioctl(fd, VIDIOC_DQBUF, &nb) < 0) break;
+				xioctl(fd, VIDIOC_QBUF, &b, "QBUF");                 // give the stale one back
+				b = nb; memcpy(pl, np2, sizeof np2); g_stale++;
+			}
+		}
 		hae_step(mp[b.index][0], gw, gh);
 		int every = getenv("A7Z_EVERY") ? atoi(getenv("A7Z_EVERY")) : 10;
 		if (getenv("A7Z_STDOUT")) {            // live stream: raw planar YUV420 frames to stdout, every A7Z_SKIP-th frame
@@ -745,6 +759,7 @@ int main(int argc, char **argv)
 	if (api && isp_id >= 0) { api->ispStop(isp_id); }
 	if (api) DestroyAWIspApi(api);
 	close(fd);
+	if (g_fresh) fprintf(stderr, "[a7zcap] dropped %ld stale frames to keep the preview current\n", g_stale);
 	fprintf(stderr, "[a7zcap] done\n");
 	return 0;
 }
