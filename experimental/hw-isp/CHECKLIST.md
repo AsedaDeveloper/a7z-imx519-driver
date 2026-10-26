@@ -17,16 +17,16 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] B1 Standard V4L2 + media-controller node (sensor, ISP, lens) so GStreamer / ffmpeg / OpenCV work directly, not only through `a7zcap` / `a7zdual`
 - [ ] B19 Standard apps get ISP-processed, autofocused frames with no custom tool: `cv2.VideoCapture(0)`, GStreamer `v4l2src`, `ffmpeg -f v4l2`, `v4l2-ctl` (focus / exposure / white-balance controls) and a Picamera2-style Python API. Needs B1, B2 and the ISP running as a daemon (libisp must be started by something); done when one test script passes with each of them (B1 is the V4L2 node itself, B19 is the acceptance test)
 - [ ] B2 Lens as a standard V4L2 control (`FOCUS_ABSOLUTE`) instead of vendor ioctls
-- [ ] B3 Device-tree overlay and a service so it works after every boot with no manual steps
+- [ ] B3 Device-tree overlay and a service so it works after every boot with no manual steps (**found Oct 26**: the boot default had reverted to `l0`, which has no camera overlay, so the camera failed to probe; set back to `l0cam`, but u-boot-update can reset it again)
 ### B-2 Stability
 - [ ] B4 Dropped frames: cached buffers or DMA-buf, more queued buffers (VIN drops frames when userspace holds uncached buffers)
-- [ ] B5 Stall recovery watchdog, clean stream start/stop, verified power-up and reset order
+- [ ] B5 Stall recovery watchdog, clean stream start/stop, verified power-up and reset order (**found Oct 26**: a failed encode wedges the video engine until `rmmod/modprobe sunxi_ve`; the watchdog should do this)
 - [ ] B6 MIPI link margin: error counters, checks across lane speeds, CRC/ECC handling (link-damage metric exists)
 - [ ] B7 Soak tests and a regression script (hours-long runs, repeated start/stop, replug; log drops, fps, AF time, WB error)
 - [ ] B8 Exposure/gain latency compensation per sensor (settings take effect a couple of frames late)
 ### B-3 Hardware blocks not used yet
-- [ ] B9 Hardware video encoder, H.264 / H.265 (verify) - removes the USB ceiling for preview and recording
-- [ ] B10 Hardware JPEG encoder (verify)
+- [x] B9 Hardware video encoder, H.264 / H.265 — works and is wired into a7zcap (`A7Z_ENC=`); 1088p at ~110 fps H.264 / ~127 fps H.265. **Ceiling: nothing above 1080p encodes** (vendor demo fails too). See ENCODER.md
+- [x] B10 Hardware JPEG encoder — works, ~80 fps at 1920x1088, valid JPEG verified (`A7Z_ENC=jpeg`)
 - [ ] B11 2D engine (G2D) for scaling / rotation / colour conversion instead of the CPU box downscale (verify)
 - [ ] B12 NPU for on-device detection (verify)
 - [ ] B13 More ISP stages: local tone mapping / DRC, 2D and 3D noise reduction, sharpening, defect-pixel correction, lens shading

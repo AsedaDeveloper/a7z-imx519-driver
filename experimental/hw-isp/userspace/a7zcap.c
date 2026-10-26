@@ -5,6 +5,10 @@
 // usage: a7zcap WIDTH HEIGHT NFRAMES OUTFILE_PREFIX [KEEP_LAST=1]
 #define _GNU_SOURCE
 #include <math.h>
+#include <vencoder.h>
+#include <memoryAdapter.h>
+#include <veAdapter.h>
+#include <sc_interface.h>
 #include <stdio.h>
 #include <dlfcn.h>
 #include <stdarg.h>
@@ -454,6 +458,75 @@ static void emit_scaled(FILE *f, void *const planes[3], int gw, int gh, int D)
 	if (getenv("A7Z_SWAWB")) swawb(g_oy, g_ou, g_ov, ow, oh);
 	fwrite(g_oy, 1, (size_t)ow * oh, f); fwrite(g_ou, 1, (size_t)ocw * och, f); fwrite(g_ov, 1, (size_t)ocw * och, f);
 }
+
+// ---- hardware video encoder (A7Z_ENC=h264|h265|jpeg): the Allwinner video engine (cedar) encodes the ISP output, so a full frame fits down the ~10 MB/s USB
+//      link instead of ~3 fps of raw 1080p. Learned the hard way: CdcMemOpen() is required or the engine faults on unmapped addresses; the height must be a
+//      multiple of 16 (the capture buffer is already 1088 rows, so 1080p encodes as 1088); bEncH264Nalu=0 gives Annex-B with inline SPS/PPS; above 1080p the
+//      engine times out (the vendor's own demoVencoder fails identically) and stays wedged until sunxi_ve is reloaded.
+static VideoEncoder *g_venc; static struct ScMemOpsS *g_encmem; static int g_enc_w, g_enc_h, g_enc_hdr;
+static VENC_CODEC_TYPE g_enc_codec;
+static int enc_open(int w, int h)
+{
+	const char *cs = getenv("A7Z_ENC");
+	g_enc_codec = !strcmp(cs, "h265") ? VENC_CODEC_H265 : !strcmp(cs, "jpeg") ? VENC_CODEC_JPEG : VENC_CODEC_H264;
+	int fps = getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30;
+	int kbps = getenv("A7Z_ENC_KBPS") ? atoi(getenv("A7Z_ENC_KBPS")) : 6000;
+	g_enc_w = w; g_enc_h = h & ~15;
+	g_venc = VideoEncCreate(g_enc_codec);
+	if (!g_venc) { fprintf(stderr, "[a7zcap] VideoEncCreate failed\n"); return -1; }
+	int v = kbps * 1000; VideoEncSetParameter(g_venc, VENC_IndexParamBitrate, &v);
+	VideoEncSetParameter(g_venc, VENC_IndexParamFramerate, &fps);
+	if (g_enc_codec == VENC_CODEC_H264) {
+		VencH264Param p; memset(&p, 0, sizeof p);
+		p.bEntropyCodingCABAC = 1; p.nBitrate = v; p.nFramerate = fps;
+		p.nCodingMode = VENC_FRAME_CODING; p.nMaxKeyInterval = fps;
+		p.sProfileLevel.nProfile = VENC_H264ProfileMain; p.sProfileLevel.nLevel = VENC_H264Level41;
+		p.sQPRange.nMinqp = 10; p.sQPRange.nMaxqp = 45;
+		VideoEncSetParameter(g_venc, VENC_IndexParamH264Param, &p);
+	}
+	VencBaseConfig cfg; memset(&cfg, 0, sizeof cfg);
+	int dsth = getenv("A7Z_ENC_H") ? atoi(getenv("A7Z_ENC_H")) : g_enc_h;   // encode the 16-aligned buffer but declare the real height (1080 of 1088) so decoders crop the padding rows
+	cfg.nInputWidth = w; cfg.nInputHeight = g_enc_h; cfg.nDstWidth = w; cfg.nDstHeight = dsth;
+	cfg.nStride = w; cfg.eInputFormat = VENC_PIXEL_YUV420P; cfg.bEncH264Nalu = 0;
+	cfg.memops = MemAdapterGetOpsS();
+	if (!cfg.memops || CdcMemOpen(cfg.memops) != 0) { fprintf(stderr, "[a7zcap] CdcMemOpen failed\n"); return -1; }
+	g_encmem = cfg.memops;
+	cfg.veOpsS = GetVeOpsS(VE_OPS_TYPE_NORMAL);
+	if (VideoEncInit(g_venc, &cfg) != 0) { fprintf(stderr, "[a7zcap] VideoEncInit failed\n"); return -1; }
+	VencAllocateBufferParam ab; memset(&ab, 0, sizeof ab);
+	ab.nBufferNum = 4; ab.nSizeY = w * g_enc_h; ab.nSizeC = w * g_enc_h / 2;
+	if (AllocInputBuffer(g_venc, &ab) != 0) { fprintf(stderr, "[a7zcap] AllocInputBuffer failed\n"); return -1; }
+	g_enc_hdr = (g_enc_codec == VENC_CODEC_JPEG);
+	fprintf(stderr, "[a7zcap] encoder: %s %dx%d %d fps %d kbps\n", cs, w, g_enc_h, fps, kbps);
+	return 0;
+}
+static void enc_frame(FILE *f, void *const planes[3], int gw, long long pts)
+{
+	VencInputBuffer ib; memset(&ib, 0, sizeof ib);
+	if (GetOneAllocInputBuffer(g_venc, &ib) != 0) return;
+	size_t ys = (size_t)gw * g_enc_h, cs = ys / 4;
+	memcpy(ib.pAddrVirY, planes[0], ys);                       // capture stride equals the width, so the planes copy straight across
+	memcpy(ib.pAddrVirC, planes[1], cs);                       // YUV420P: U then V, back to back
+	memcpy(ib.pAddrVirC + cs, planes[2], cs);
+	ib.nPts = pts;
+	FlushCacheAllocInputBuffer(g_venc, &ib);
+	AddOneInputBuffer(g_venc, &ib);
+	int rc = VideoEncodeOneFrame(g_venc);
+	AlreadyUsedInputBuffer(g_venc, &ib); ReturnOneAllocInputBuffer(g_venc, &ib);
+	if (rc != 0) { fprintf(stderr, "[a7zcap] encode rc=%d\n", rc); return; }
+	if (!g_enc_hdr) {                                          // SPS/PPS only exist once a frame has been encoded
+		VencHeaderData hd; memset(&hd, 0, sizeof hd);
+		int idx = (g_enc_codec == VENC_CODEC_H265) ? VENC_IndexParamH265Header : VENC_IndexParamH264SPSPPS;
+		if (VideoEncGetParameter(g_venc, idx, &hd) == 0 && hd.nLength && hd.pBuffer) fwrite(hd.pBuffer, 1, hd.nLength, f);
+		g_enc_hdr = 1;
+	}
+	VencOutputBuffer ob; memset(&ob, 0, sizeof ob);
+	if (GetOneBitstreamFrame(g_venc, &ob) == 0) {
+		fwrite(ob.pData0, 1, ob.nSize0, f);
+		if (ob.nSize1) fwrite(ob.pData1, 1, ob.nSize1, f);
+		FreeOneBitStreamFrame(g_venc, &ob);
+	}
+}
 static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *pl, size_t ml0, int np, int gw, int gh)
 {
 	size_t l0 = pl[0].bytesused ? pl[0].bytesused : ml0;
@@ -557,6 +630,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_AF_GAINMAX")) g_af_gainmax = atoi(getenv("A7Z_AF_GAINMAX"));
 	if (getenv("A7Z_AF_SKIP")) g_af_skip = atoi(getenv("A7Z_AF_SKIP"));
 	if (getenv("A7Z_AF_PROBE")) af_probe();
+	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_AF")) { grab_sharp(12, 0); autofocus(1); }   // let exposure/gain settle first: the first frames are noisy and fool the sweep
 	if (getenv("A7Z_FOCUS")) {                       // hold the lens at a fixed code for the whole capture
@@ -616,7 +690,8 @@ int main(int argc, char **argv)
 			int skip = getenv("A7Z_SKIP") ? atoi(getenv("A7Z_SKIP")) : 2;
 			if (n % skip == 0) {
 				int sd = getenv("A7Z_STREAM_D") ? atoi(getenv("A7Z_STREAM_D")) : 1;
-				if (sd > 1 && np >= 3) emit_scaled(outf, mp[b.index], gw, gh, sd);
+				if (g_venc) enc_frame(outf, mp[b.index], gw, (long long)n * 1000000 / (getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30));
+				else if (sd > 1 && np >= 3) emit_scaled(outf, mp[b.index], gw, gh, sd);
 				else emit_frame(outf, mp[b.index], pl, ml[b.index][0], np, gw, gh);
 				fflush(outf);
 			}
