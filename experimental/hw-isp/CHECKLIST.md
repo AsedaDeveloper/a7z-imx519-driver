@@ -5,7 +5,7 @@ Priority order to start with: **B9 (hardware encoder) -> B4/B5/B7 (drops, stalls
 Items marked (verify) depend on a hardware block that must first be confirmed on our vendor kernel.
 
 ## A. Carried over from the first "still to do" list
-- [ ] A1 Highlight protection without the sharpness loss (find libisp's own exposure target / tone-curve / DRC settings; own-exposure code `A7Z_HAE` costs sharpness)
+- [ ] A1 Highlight protection without the sharpness loss. **Oct 26: partial — ISP stage flag 24 (`tuning_v7`) cuts clipped pixels by ~32% (3 paired runs) with no cost to noise, colour or detail, unlike `A7Z_HAE`. Not enough on its own; PLTM/DRC curves still untouched.** See HIGHLIGHTS.md
 - [ ] A2 Check white balance (tuning_v6) under daylight and lamps, not only the iPad chart
 - [x] A3 Autofocus with a moving subject: settle-wait, 0.90 / 0.80 triggers, futile-refocus guard (done Oct 24, verified live)
 - [ ] A4 Bring the newer autofocus watcher, exposure cap and fixes into the full-resolution tool (`a7zdual`)
@@ -29,7 +29,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [x] B10 Hardware JPEG encoder — works, ~80 fps at 1920x1088, valid JPEG verified (`A7Z_ENC=jpeg`)
 - [ ] B11 2D engine (G2D) for scaling / rotation / colour conversion instead of the CPU box downscale (verify)
 - [ ] B12 NPU for on-device detection (verify)
-- [ ] B13 More ISP stages: local tone mapping / DRC, 2D and 3D noise reduction, sharpening, defect-pixel correction, lens shading
+- [ ] B13 More ISP stages: local tone mapping / DRC, 2D and 3D noise reduction, sharpening, defect-pixel correction, lens shading. **Oct 26: all 32 stage flags swept one at a time (HIGHLIGHTS.md) — flag 24 helps and is deployed, flag 27 is sharpest but clips more, flag 6 blanks the frame, the other 10 are worse on both counts; `flags_all_on` gives a black frame. Stage identities and the curve parameters still unknown**
 ### B-4 Tuning (the Pi's real advantage)
 - [ ] B14 Per-module calibration: lens shading, black level, noise profile per ISO, colour matrix per illuminant, gamma / tone curve (white balance done: v6; matrix near identity, not deployed)
 - [ ] B15 Proper chart (ColorChecker) and real lamps instead of the iPad
