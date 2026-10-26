@@ -10,7 +10,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [x] A3 Autofocus with a moving subject: settle-wait, 0.90 / 0.80 triggers, futile-refocus guard (done Oct 24, verified live)
 - [ ] A4 Bring the newer autofocus watcher, exposure cap and fixes into the full-resolution tool (`a7zdual`)
 - [ ] A5 Cool light above ~8000 K still reads blue (find the AWB limit that stops libisp choosing the coolest lights)
-- [ ] A6 Higher-resolution / higher-fps preview (needs B9 or B10; the USB link carries ~10 MB/s raw)
+- [x] A6 Higher-resolution / higher-fps preview — full 1080p30 over USB via hardware H.264 (~0.75 MB/s at 6 Mbit/s); viewer `lv_enc.sh`
 
 ## B. Make it a proper camera device, stability, hardware blocks, tuning
 ### B-1 Standard interfaces
