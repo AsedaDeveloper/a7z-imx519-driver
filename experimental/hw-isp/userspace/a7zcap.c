@@ -76,6 +76,8 @@ static volatile int g_in_af = 0;
 static int g_fresh = 0; static long g_stale = 0;   // A7Z_FRESH=1: drop frames the driver queued while we were busy, so the preview shows the newest one
 static FILE *g_outf = NULL; static long long g_pts_n = 0;   // set when streaming; autofocus keeps feeding it so a refocus does not stop the video
 static void stream_frame(void *const planes[3]);
+static int g_lb_fd = -1; static int g_lb_h = 0;
+static void lb_frame(void *const planes[3], int gw);   // A7Z_LOOPBACK=/dev/videoN: publish ISP frames to a v4l2loopback node so ordinary V4L2 apps can read them
 static unsigned g_seq_last; static long g_seq_drop; static long g_frames_out;   // drop accounting must span BOTH loops: autofocus dequeues frames too, and counting
 static void seq_track(unsigned seq)                                             // only the main loop's buffers made an autofocus sweep look like 45 dropped frames
 {
@@ -546,11 +548,49 @@ static void enc_frame(FILE *f, void *const planes[3], int gw, long long pts)
 // left a ~1.5 s hole in the video and the driver dropped ~45 queued frames (measured: all 228 drops in a 9.7 min soak were autofocus holes).
 static void stream_frame(void *const planes[3])
 {
+	lb_frame(planes, g_gw);
 	if (!g_venc || !g_outf) return;
+	g_frames_out--;   // lb_frame already counted this one
 	int fps = getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30;
 	enc_frame(g_outf, planes, g_gw, g_pts_n++ * 1000000 / (fps ? fps : 30));
 	g_frames_out++;
 	fflush(g_outf);
+}
+
+// ---- v4l2loopback output (A7Z_LOOPBACK=/dev/videoN) ----------------------------------------------------------------
+// libisp cannot run in a different process from the one that streams (a second process gets S_FMT EBUSY / STREAMON EPERM),
+// so a standard V4L2 node has to be fed rather than shared: this writes the ISP's frames into a loopback device, which
+// ffmpeg, GStreamer, OpenCV and anything else can then open normally.
+static int lb_open(const char *dev, int w, int h)
+{
+	int fd = open(dev, O_RDWR);
+	if (fd < 0) { fprintf(stderr, "[a7zcap] loopback open %s: %s\n", dev, strerror(errno)); return -1; }
+	struct v4l2_format f; memset(&f, 0, sizeof f);
+	f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	f.fmt.pix.width = w; f.fmt.pix.height = h;
+	f.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;     // YU12: Y plane, then U, then V
+	f.fmt.pix.field = V4L2_FIELD_NONE;
+	f.fmt.pix.bytesperline = w;
+	f.fmt.pix.sizeimage = w * h * 3 / 2;
+	if (ioctl(fd, VIDIOC_S_FMT, &f) < 0) { fprintf(stderr, "[a7zcap] loopback S_FMT: %s\n", strerror(errno)); close(fd); return -1; }
+	g_lb_h = h;
+	fprintf(stderr, "[a7zcap] loopback: %s %dx%d YU12\n", dev, w, h);
+	return fd;
+}
+static void lb_frame(void *const planes[3], int gw)
+{
+	if (g_lb_fd < 0) return;
+	int h = g_lb_h, cw = gw / 2, ch = h / 2;          // the capture buffer is 1088 rows; publish the real 1080 and its matching chroma
+	static unsigned char *buf; static size_t cap;
+	size_t need = (size_t)gw * h * 3 / 2;
+	if (need > cap) { cap = need; buf = realloc(buf, cap); }
+	if (!buf) return;
+	memcpy(buf, planes[0], (size_t)gw * h);
+	memcpy(buf + (size_t)gw * h, planes[1], (size_t)cw * ch);
+	memcpy(buf + (size_t)gw * h + (size_t)cw * ch, planes[2], (size_t)cw * ch);
+	ssize_t wr = write(g_lb_fd, buf, need);
+	if (wr > 0) g_frames_out++;
+	if (wr < 0 && errno != EAGAIN) fprintf(stderr, "[a7zcap] loopback write: %s\n", strerror(errno));
 }
 static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *pl, size_t ml0, int np, int gw, int gh)
 {
@@ -660,6 +700,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_FRESH")) g_fresh = 1;
 	if (getenv("A7Z_STDOUT")) g_outf = outf;
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
+	if (getenv("A7Z_LOOPBACK")) g_lb_fd = lb_open(getenv("A7Z_LOOPBACK"), gw, H);
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_3ADUMP") && api && isp_id >= 0) {        // snapshot libisp's live 3A/ISP state: diffing it between two tunings shows which block a flag actually drives
 		int i3a = 0, dbg = 0;
@@ -756,6 +797,7 @@ int main(int argc, char **argv)
 			}
 		}
 		int every = getenv("A7Z_EVERY") ? atoi(getenv("A7Z_EVERY")) : 10;
+		if (g_lb_fd >= 0 && !getenv("A7Z_STDOUT")) lb_frame(mp[b.index], gw);   // loopback without a stdout stream: publish every frame here
 		if (getenv("A7Z_STDOUT")) {            // live stream: raw planar YUV420 frames to stdout, every A7Z_SKIP-th frame
 			int skip = getenv("A7Z_SKIP") ? atoi(getenv("A7Z_SKIP")) : 2;
 			if (n % skip == 0) {
