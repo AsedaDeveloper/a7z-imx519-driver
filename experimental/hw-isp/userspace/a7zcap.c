@@ -661,6 +661,21 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_STDOUT")) g_outf = outf;
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
+	if (getenv("A7Z_3ADUMP") && api && isp_id >= 0) {        // snapshot libisp's live 3A/ISP state: diffing it between two tunings shows which block a flag actually drives
+		int i3a = 0, dbg = 0;
+		api->ispGetInfoLength(isp_id, &i3a, &dbg);        // returns non-zero on this build but still fills the lengths
+		if (i3a > 0) {
+			void *buf = calloc(1, i3a);
+			for (int k = 0; k < 40; k++) grab_sharp(1, 0);     // let 3A converge before the snapshot
+			int rc3 = api->ispGet3AParameters(isp_id, buf);        // non-zero return still fills the buffer on this build
+			{
+				FILE *d = fopen(getenv("A7Z_3ADUMP"), "wb");
+				if (d) { fwrite(buf, 1, i3a, d); fclose(d); }
+				fprintf(stderr, "[a7zcap] 3A dump: %d bytes (rc=%d) -> %s\n", i3a, rc3, getenv("A7Z_3ADUMP"));
+			}
+			free(buf);
+		} else fprintf(stderr, "[a7zcap] ispGetInfoLength failed (i3a=%d dbg=%d)\n", i3a, dbg);
+	}
 	if (getenv("A7Z_AF")) { grab_sharp(12, 0); autofocus(1); }   // let exposure/gain settle first: the first frames are noisy and fool the sweep
 	if (getenv("A7Z_FOCUS")) {                       // hold the lens at a fixed code for the whole capture
 		int sfd2 = open("/dev/v4l-subdev0", O_RDWR);

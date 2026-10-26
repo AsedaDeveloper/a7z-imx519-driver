@@ -39,7 +39,15 @@ free. Nothing is given up.
 
 ## A1 is not finished
 A third fewer clipped pixels is not real highlight protection — a bright window would still blow out. What is still missing:
-* which stage flag 24 actually is. The main enable path (`__isp_ctx_apply_enable`) maps each flag byte to a module-enable bit, but three bytes (including the one
-  flag 24 writes) are not in that table, so they are configured elsewhere — consistent with a stage that carries its own config, like PLTM. Unconfirmed.
+* which stage flag 24 actually is — **two attempts failed**:
+  1. The main enable path (`__isp_ctx_apply_enable`) maps each flag byte to a module-enable bit, but three of the thirty-two bytes, including the one flag 24
+     writes, are absent from that table. So it is configured elsewhere, which is consistent with a stage carrying its own config such as PLTM, but that is
+     inference, not proof.
+  2. Diffing libisp's live 3A state (`ispGet3AParameters`, 73416 bytes, dumped with `A7Z_3ADUMP=`) between the two tunings does not isolate it: a control pair
+     taken with the *same* tuning differs in 2531 bytes, more than the 1469 that differ between v6 and v7. The buffer is dominated by per-run statistics, so
+     the method cannot separate the flag's effect from noise.
+
+  The behaviour is at least consistent with tone mapping — highlights compressed, shadows slightly raised, detail untouched — but it is unproven. Identifying it
+  needs a different approach: reading the ISP hardware registers directly, or a static scene with exposure pinned so the curve itself can be plotted.
 * the PLTM / DRC curve parameters themselves. Only the enable flag was touched; the curves are untouched defaults.
 * a scene with a genuinely blown window, rather than a lamp, to test against.
