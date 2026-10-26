@@ -21,7 +21,7 @@ reload_ve
 while :; do
   rm -f "$CTX"                                     # libisp reloads stale ISP state over the tuning table otherwise
   if [ -n "$NODE" ]; then
-    env A7Z_LOOPBACK="$NODE" A7Z_FRESH=1 A7Z_HEALTH=1 A7Z_AF=1 A7Z_FPS=$FPS A7Z_MAXEXP=30000 \
+    env A7Z_LOOPBACK="$NODE" A7Z_CTL=${A7Z_CTL:-/run/a7zcam.ctl} A7Z_FRESH=1 A7Z_HEALTH=1 A7Z_AF=1 A7Z_FPS=$FPS A7Z_MAXEXP=30000 \
         A7Z_EVERY=100000 "$BIN" "$W" "$H" 100000000 /tmp/cap/lb >>"$LOG" 2>&1
   else
     env A7Z_FRESH=1 A7Z_HEALTH=1 A7Z_ENC=h264 A7Z_ENC_H=$H A7Z_ENC_KBPS=$KBPS A7Z_STDOUT=1 A7Z_AF=1 A7Z_SKIP=1 \

@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
 #include <linux/videodev2.h>
 #include "sunxi_camera_v2.h"
@@ -76,6 +77,7 @@ static volatile int g_in_af = 0;
 static int g_fresh = 0; static long g_stale = 0;   // A7Z_FRESH=1: drop frames the driver queued while we were busy, so the preview shows the newest one
 static FILE *g_outf = NULL; static long long g_pts_n = 0;   // set when streaming; autofocus keeps feeding it so a refocus does not stop the video
 static void stream_frame(void *const planes[3]);
+static void ctl_poll(void);
 static int g_lb_fd = -1; static int g_lb_h = 0;
 static void lb_frame(void *const planes[3], int gw);   // A7Z_LOOPBACK=/dev/videoN: publish ISP frames to a v4l2loopback node so ordinary V4L2 apps can read them
 static unsigned g_seq_last; static long g_seq_drop; static long g_frames_out;   // drop accounting must span BOTH loops: autofocus dequeues frames too, and counting
@@ -244,6 +246,7 @@ static void autofocus_slow(int full)
 // A7Z_AF_SKIP = frames discarded after each lens move (default 4; probe: the first 3 frames still show the old focus; the Pi tuning uses 5; run A7Z_AF_PROBE=1 to measure what this pipeline needs).
 static int g_af_skip = 2;   // settle frames after a fine-scan lens move (a move shows on the 4th frame; image-scored equal to 4)
 static double g_af_dpt = 0.0;
+static int g_af_paused = 0;                 // control file can hold autofocus still so a manual focus sticks
 #define AF_CODE_PER_DPT 273.0
 #define AF_DPT_MAX 12.0
 static int af_code(double dpt) { if (dpt < 0) dpt = 0; if (dpt > AF_DPT_MAX) dpt = AF_DPT_MAX; return (int)(dpt * AF_CODE_PER_DPT + 0.5); }
@@ -592,6 +595,42 @@ static void lb_frame(void *const planes[3], int gw)
 	if (wr > 0) g_frames_out++;
 	if (wr < 0 && errno != EAGAIN) fprintf(stderr, "[a7zcap] loopback write: %s\n", strerror(errno));
 }
+
+// ---- control file (A7Z_CTL=/run/a7zcam.ctl) --------------------------------------------------------------------
+// The lens has no working standard V4L2 control: the ak7375 actuator subdev exposes none at all, and the
+// focus_absolute on the vin nodes reaches libisp but never moves the lens (measured: sharpness flat across 0..127).
+// Apps also cannot reach a control on the loopback node, because v4l2loopback does not forward controls to the
+// producer. So focus is driven through a small file that is read once per frame:
+//     focus 7.2     park the lens at 7.2 dioptre and hold it there
+//     af            run one autofocus now
+//     af auto       hand control back to the autofocus watcher
+static const char *g_ctl_path;
+static time_t g_ctl_mtime;
+static void ctl_poll(void)
+{
+	if (!g_ctl_path) return;
+	struct stat st;
+	if (stat(g_ctl_path, &st) != 0 || st.st_mtime == g_ctl_mtime) return;
+	g_ctl_mtime = st.st_mtime;
+	FILE *f = fopen(g_ctl_path, "r");
+	if (!f) return;
+	char line[128] = {0};
+	if (fgets(line, sizeof line, f)) {
+		char verb[32] = {0}; double arg = 0; char word[32] = {0};
+		if (sscanf(line, "%31s %lf", verb, &arg) >= 1) {
+			if (!strcmp(verb, "focus")) {
+				sscanf(line, "%*s %31s", word);
+				g_af_paused = 1; g_af_dpt = arg; set_lens(af_code(arg));
+				fprintf(stderr, "[a7zcap] CTL focus %.2f dpt (autofocus held)\n", arg);
+			} else if (!strcmp(verb, "af")) {
+				sscanf(line, "%*s %31s", word);
+				if (!strcmp(word, "auto")) { g_af_paused = 0; fprintf(stderr, "[a7zcap] CTL autofocus resumed\n"); }
+				else { g_af_paused = 0; autofocus(1); g_af_paused = 1; fprintf(stderr, "[a7zcap] CTL one-shot autofocus -> %.2f dpt (held)\n", g_af_dpt); }
+			}
+		}
+	}
+	fclose(f);
+}
 static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *pl, size_t ml0, int np, int gw, int gh)
 {
 	size_t l0 = pl[0].bytesused ? pl[0].bytesused : ml0;
@@ -701,6 +740,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_STDOUT")) g_outf = outf;
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
 	if (getenv("A7Z_LOOPBACK")) g_lb_fd = lb_open(getenv("A7Z_LOOPBACK"), gw, H);
+	if (getenv("A7Z_CTL")) { g_ctl_path = getenv("A7Z_CTL"); fprintf(stderr, "[a7zcap] control file: %s\n", g_ctl_path); }
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_3ADUMP") && api && isp_id >= 0) {        // snapshot libisp's live 3A/ISP state: diffing it between two tunings shows which block a flag actually drives
 		int i3a = 0, dbg = 0;
@@ -785,6 +825,7 @@ int main(int argc, char **argv)
 			}
 		}
 		seq_track(b.sequence);
+		ctl_poll();
 		hae_step(mp[b.index][0], gw, gh);
 		if (getenv("A7Z_HEALTH")) {              // one line a second: frames, driver sequence gaps (dropped frames) and measured rate
 			static struct timespec hp; static long hf0;
@@ -845,7 +886,8 @@ int main(int argc, char **argv)
 				if (!skipcheck && ratio >= lowthr && ratio <= 1.2) g_af_peak += (cur > g_af_peak ? 0.05 : 0.002) * (cur - g_af_peak);   // follows an increase quickly, a decrease only very slowly, so a real (shallow) defocus is not tracked away   // follow slow drift without chasing a real defocus
 				skipcheck = 0;
 				if (getenv("A7Z_AF_DEBUG") && since % 5 == 0) fprintf(stderr, "[a7zcap] AF watch: sharpness %.2f ref %.2f ratio %.2f low=%d\n", cur, g_af_peak, ratio, low);
-				if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10 && spread > 0.12 && defer < 30) { defer++; if (defer == 1 && getenv("A7Z_AF_DEBUG")) fprintf(stderr, "[a7zcap] AF: scene still moving (spread %.2f), waiting for it to settle\n", spread); }   // a sweep on a moving subject picks a wrong peak: wait (max ~2 s)
+				if (g_af_paused) { low = 0; }
+			else if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10 && spread > 0.12 && defer < 30) { defer++; if (defer == 1 && getenv("A7Z_AF_DEBUG")) fprintf(stderr, "[a7zcap] AF: scene still moving (spread %.2f), waiting for it to settle\n", spread); }   // a sweep on a moving subject picks a wrong peak: wait (max ~2 s)
 			else if ((low >= 3 || (low >= 2 && ratio < 0.7)) && since > 10) { defer = 0; double dpt0 = g_af_dpt; struct timespec ta; clock_gettime(CLOCK_MONOTONIC, &ta); fprintf(stderr, "[a7zcap] AF: sharpness %.2f vs reference %.2f, refocusing\n", cur, g_af_peak); autofocus(0); low = 0; since = 0; rebase = 4; futile = fabs(g_af_dpt - dpt0) < 0.2 ? 45 : 0; if (g_td_set) { struct timespec te; clock_gettime(CLOCK_MONOTONIC, &te); fprintf(stderr, "[a7zcap] TEST: recovered to %.2f dpt, %.2f s after the defocus\n", g_af_dpt, (te.tv_sec - g_td.tv_sec) + (te.tv_nsec - g_td.tv_nsec) * 1e-9); g_td_set = 0; } }
 			}
 			continue;

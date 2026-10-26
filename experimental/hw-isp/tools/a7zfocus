@@ -1,0 +1,15 @@
+#!/bin/sh
+# a7zfocus — drive the IMX519 lens while the camera is serving /dev/video9.
+#   a7zfocus 7.2     park the lens at 7.2 dioptre (autofocus holds off)
+#   a7zfocus af      run one autofocus now, then hold
+#   a7zfocus auto    hand control back to the autofocus watcher
+# The lens has no working standard V4L2 control on this kernel (see CONTROLS.md), so this writes a one-line
+# command file that the capture process reads once per frame.
+CTL=${A7Z_CTL:-/run/a7zcam.ctl}
+case "${1:-}" in
+  "")      echo "usage: a7zfocus <dioptre 0-12 | af | auto>" >&2; exit 2;;
+  af)      echo "af" > "$CTL";;
+  auto)    echo "af auto" > "$CTL";;
+  *)       case "$1" in ''|*[!0-9.]*) echo "a7zfocus: '$1' is not a dioptre value" >&2; exit 2;; esac
+           echo "focus $1" > "$CTL";;
+esac
