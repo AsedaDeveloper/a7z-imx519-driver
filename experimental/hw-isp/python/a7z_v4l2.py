@@ -10,6 +10,12 @@ Frames arrive already through the hardware ISP: autofocused, white-balanced, exp
             print(len(y))               # Y plane, width*height bytes
 
 numpy is optional: Camera.rgb() uses it when present.
+
+Per-frame metadata (what the sensor and lens were doing for each frame) comes from the feeder's ring file, matched by timestamp:
+
+    with Camera() as cam:
+        y, u, v, meta = cam.read_with_meta()
+        print(meta["exp_us"], meta["gain"] / 16, meta["lens_dpt"])
 """
 import ctypes
 import fcntl
@@ -60,6 +66,47 @@ def fourcc(s):
 
 
 PIX_YUV420 = fourcc(b"YU12")      # planar Y, then U, then V — what the node serves
+
+
+METARING = os.environ.get("A7Z_METARING", "/run/a7zcam.meta")
+_MR_HDR, _MR_REC = 32, 40
+
+
+class MetaRing:
+    """Reader for the feeder's per-frame metadata ring (A7Z_METARING). Records: ts_ns (CLOCK_MONOTONIC), seq, exp_us, gain (16 = 1x), lens_code,
+    lens_dpt, r_gain, b_gain, flags (bit0 autofocus sweeping, bit1 lens held)."""
+
+    def __init__(self, path=METARING):
+        self.f = open(path, "rb")
+        self.m = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
+        magic, ver, self.slots, self.rec = struct.unpack_from("<IIII", self.m, 0)
+        if magic != 0x4d5a3741:
+            raise RuntimeError("%s is not an A7Z metadata ring" % path)
+
+    def _rec(self, n):
+        o = _MR_HDR + (n % self.slots) * self.rec
+        ts, seq, exp, gain, code, r, b, flags, dpt = struct.unpack_from("<QIIIIIIIf", self.m, o)
+        return {"ts_ns": ts, "seq": seq, "exp_us": exp, "gain": gain, "lens_code": code, "lens_dpt": round(dpt, 3), "r_gain": r, "b_gain": b, "flags": flags}
+
+    def head(self):
+        return struct.unpack_from("<Q", self.m, 16)[0]
+
+    def nearest(self, ts_ns, tol_ns=16_000_000):
+        """The record whose timestamp is closest to ts_ns (a frame's V4L2 buffer time), or None if nothing is within tol_ns."""
+        h = self.head()
+        best = None
+        for n in range(h - 1, max(-1, h - 1 - 90), -1):        # last ~3 s
+            r = self._rec(n)
+            d = abs(r["ts_ns"] - ts_ns)
+            if best is None or d < best[0]:
+                best = (d, r)
+            elif r["ts_ns"] < ts_ns - tol_ns:
+                break
+        return best[1] if best and best[0] <= tol_ns else None
+
+    def close(self):
+        self.m.close()
+        self.f.close()
 
 
 class Camera:
@@ -146,6 +193,9 @@ class Camera:
         struct.pack_into("<I", b, 60, MEMORY_MMAP)
         fcntl.ioctl(self.fd, VIDIOC_DQBUF, b, True)
         index, used = struct.unpack_from("<I", b, 0)[0], struct.unpack_from("<I", b, 8)[0]
+        sec, usec = struct.unpack_from("<qq", b, 24)              # v4l2_buffer.timestamp: CLOCK_MONOTONIC, stamped by the loopback when the feeder wrote the frame
+        self.last_ts_ns = sec * 1_000_000_000 + usec * 1000
+        self.last_seq = struct.unpack_from("<I", b, 56)[0]
         m, length = self.buffers[index]
         n = used or length
         ysz = self.width * self.height
@@ -153,6 +203,18 @@ class Camera:
         data = m[:n]
         self._qbuf(index)
         return data[:ysz], data[ysz:ysz + csz], data[ysz + csz:ysz + 2 * csz]
+
+    def read_with_meta(self, timeout=3.0):
+        """(Y, U, V, meta): the frame plus its metadata record, or meta=None if the ring is missing or no record matches."""
+        y, u, v = self.read(timeout)
+        meta = None
+        try:
+            if getattr(self, "_ring", None) is None:
+                self._ring = MetaRing()
+            meta = self._ring.nearest(self.last_ts_ns)
+        except (OSError, RuntimeError, ValueError):
+            self._ring = None
+        return y, u, v, meta
 
     def frames(self, count=None):
         n = 0

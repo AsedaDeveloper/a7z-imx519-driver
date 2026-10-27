@@ -23,7 +23,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [x] B5 Stall recovery watchdog — `tools/a7zstream.sh` supervises a7zcap (exit 3 = encoder wedged -> reload `sunxi_ve`, exit 4 = capture stalled, other -> retry); verified by killing the process mid-stream and by a busy device. See STABILITY.md
 - [ ] B6 MIPI link margin: error counters, checks across lane speeds, CRC/ECC handling (link-damage metric exists)
 - [x] B7 Soak test and regression script — `tools/soak.sh`; 9.6 min at 1080p30 after the autofocus fix: 17900 frames, **min and median 30.0 fps, 0 dropped frames over 8 refocuses**, 0 restarts, 0 errors. Hours-long runs and replug still to do
-- [ ] B8 Exposure/gain latency compensation per sensor (settings take effect a couple of frames late)
+- [ ] B8 Exposure/gain latency compensation per sensor (settings take effect a couple of frames late) **Oct 27: the latency is now measured, 4 frames at 1080p30 (see METADATA.md) and used when labelling frames; whether libisp's own AE loop allows for it (and hunts because it does not) is not examined, so not ticked.**
 ### B-3 Hardware blocks not used yet
 - [x] B9 Hardware video encoder, H.264 / H.265 — works and is wired into a7zcap (`A7Z_ENC=`); 1088p at ~110 fps H.264 / ~127 fps H.265. **Ceiling: nothing above 1080p encodes** (vendor demo fails too). See ENCODER.md
 - [x] B10 Hardware JPEG encoder — works, ~80 fps at 1920x1088, valid JPEG verified (`A7Z_ENC=jpeg`)
@@ -36,7 +36,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 ### B-5 Sensor modes and features
 - [ ] B16 More sensor modes (binned, higher fps) and a clean mode switch without reload
 - [ ] B17 Check whether the IMX519 phase-detect data is usable for much faster autofocus
-- [ ] B18 Per-frame metadata (exposure, gain, lens position stored with every frame, like libcamera)
+- [x] B18 Per-frame metadata — one record per frame (exposure, gain, lens position, colour gains, autofocus flags) in a shared ring `/run/a7zcam.meta` and an optional JSON-lines log, matched to a `/dev/video9` frame by its timestamp: **90/90 frames matched as an ordinary user; recorded exposure correlates 1.000 with frame brightness at offset 0 (-0.76..+0.08 elsewhere)**. Measured the exposure pipeline latency at the same time: **4 frames** at 1080p30. `Camera.read_with_meta()` in `python/a7z_v4l2.py`. See METADATA.md
 
 ## C. Second list (smaller items and extras)
 ### C-1 Image quality and features
@@ -51,7 +51,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] C8 Thermal and power behaviour in a closed case at full load; clock pinning versus power draw
 - [ ] C9 Accurate timestamps / shared clock for the balloon and observatory logs
 - [ ] C10 Dual-camera sync
-- [ ] C11 One diagnostics tool (drops, link errors, exposure, white balance, autofocus state) **Oct 27: partial — `tools/a7zstatus` (human + `--json`, exit codes) reports service, drops, rate, autofocus, live frame stats and white-balance ratios, temperatures, libisp errors; exposure/gain (sensor controls only show defaults) and MIPI link errors (B6) are not covered. Building it found and fixed a silent failure: a feeder with no loopback ran "healthy" and published nothing; a7zcap now exits 5 and the supervisor reloads the loopback. See STABILITY.md**
+- [ ] C11 One diagnostics tool (drops, link errors, exposure, white balance, autofocus state) **Oct 27: partial — `tools/a7zstatus` (human + `--json`, exit codes) reports service, drops, rate, autofocus, live frame stats and white-balance ratios, temperatures, libisp errors; exposure/gain/lens now come from the B18 metadata ring; only MIPI link errors (B6) are not covered. Building it found and fixed a silent failure: a feeder with no loopback ran "healthy" and published nothing; a7zcap now exits 5 and the supervisor reloads the loopback. See STABILITY.md**
 ### C-3 Project side
 - [ ] C12 Documentation of what is verified, plus the soak-test script (see B7)
 - [ ] C13 Clean the driver for the Radxa / mainline kernel (upstreaming)

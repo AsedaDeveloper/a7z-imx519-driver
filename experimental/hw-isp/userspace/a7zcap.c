@@ -80,12 +80,66 @@ static void stream_frame(void *const planes[3]);
 static void ctl_poll(void);
 static int g_lb_fd = -1; static int g_lb_h = 0;
 static void lb_frame(void *const planes[3], int gw);   // A7Z_LOOPBACK=/dev/videoN: publish ISP frames to a v4l2loopback node so ordinary V4L2 apps can read them
+static int g_expstep = 0;
+// ---- per-frame metadata (checklist B18): A7Z_METARING=/run/a7zcam.meta, A7Z_META=file.jsonl -----------------------------------------------------------
+// One record per dequeued frame: what the sensor and lens were actually doing for THAT frame, not what was last commanded. A command issued after frame s shows
+// up g_explat frames later for exposure/gain/colour gains (measured 4 at 1080p30, correlation 0.999 on an exposure square wave) and g_af_lat frames later for the lens.
+// Consumers of /dev/video9 find a frame's record by timestamp: the loopback stamps each buffer with CLOCK_MONOTONIC, the same clock as ts_ns here (frames are >=33 ms apart).
+#include <stdint.h>
+#include <sys/stat.h>
+#define MH 16
+struct mexp { unsigned seq; int exp, gain, r, b; };
+struct mlens { unsigned seq; int code; };
+static struct mexp g_eh[MH]; static struct mlens g_lh[MH]; static volatile unsigned g_eh_n, g_lh_n;
+static int g_explat = 4;
+static int g_af_lat, g_af_paused;      // defined with their values further down
+#define MR_MAGIC 0x4d5a3741u      /* "A7ZM" */
+#define MR_SLOTS 1024
+#define MR_REC 40
+static unsigned char *g_mring; static FILE *g_mjson; static uint64_t g_mhead;
+static void meta_open(void)
+{
+	const char *rp = getenv("A7Z_METARING"), *jp = getenv("A7Z_META");
+	if (jp) g_mjson = fopen(jp, "a");
+	if (!rp) return;
+	size_t sz = 32 + (size_t)MR_SLOTS * MR_REC;
+	int fd = open(rp, O_RDWR | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) { fprintf(stderr, "[a7zcap] meta ring %s: %s\n", rp, strerror(errno)); return; }
+	if (ftruncate(fd, sz) < 0) { close(fd); return; }
+	fchmod(fd, 0644);
+	g_mring = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); close(fd);
+	if (g_mring == MAP_FAILED) { g_mring = NULL; return; }
+	memset(g_mring, 0, sz);
+	uint32_t *h = (uint32_t *)g_mring; h[0] = MR_MAGIC; h[1] = 1; h[2] = MR_SLOTS; h[3] = MR_REC;   // magic, version, slots, record size; u64 head count at byte 16
+	fprintf(stderr, "[a7zcap] metadata ring: %s (%d slots)\n", rp, MR_SLOTS);
+}
+static void meta_emit(unsigned seq)
+{
+	if (!g_mring && !g_mjson) return;
+	struct mexp e = { 0, 0, 0, 0, 0 }; struct mlens l = { 0, 0 };
+	unsigned n = g_eh_n;
+	for (unsigned i = 0; i < n && i < MH; i++) { struct mexp *x = &g_eh[(n - 1 - i) % MH]; e = *x; if (x->seq + (unsigned)g_explat <= seq) break; }
+	n = g_lh_n;
+	for (unsigned i = 0; i < n && i < MH; i++) { struct mlens *x = &g_lh[(n - 1 - i) % MH]; l = *x; if (x->seq + (unsigned)g_af_lat <= seq) break; }
+	struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+	uint64_t t_ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+	uint32_t flags = (g_in_af ? 1 : 0) | (g_af_paused ? 2 : 0);
+	float dpt = l.code / 273.0f;
+	if (g_mring) {
+		unsigned char *r = g_mring + 32 + (g_mhead % MR_SLOTS) * MR_REC;
+		memcpy(r, &t_ns, 8); uint32_t v[7] = { seq, (uint32_t)e.exp, (uint32_t)e.gain, (uint32_t)l.code, (uint32_t)e.r, (uint32_t)e.b, flags };
+		memcpy(r + 8, v, 28); memcpy(r + 36, &dpt, 4);
+		__sync_synchronize(); g_mhead++; memcpy(g_mring + 16, &g_mhead, 8);
+	}
+	if (g_mjson) { fprintf(g_mjson, "{\"ts_ns\":%llu,\"seq\":%u,\"exp_us\":%d,\"gain\":%d,\"lens_code\":%d,\"lens_dpt\":%.3f,\"r_gain\":%d,\"b_gain\":%d,\"flags\":%u}\n", (unsigned long long)t_ns, seq, e.exp, e.gain, l.code, dpt, e.r, e.b, flags); if ((seq & 15) == 0) fflush(g_mjson); }
+}
 static unsigned g_seq_last; static long g_seq_drop; static long g_frames_out, g_frames_in;   // drop accounting must span BOTH loops: autofocus dequeues frames too, and counting
 static void seq_track(unsigned seq)                                             // only the main loop's buffers made an autofocus sweep look like 45 dropped frames
 {
 	g_frames_in++;                                                                // every dequeued frame, main loop and autofocus alike
 	if (g_seq_last && seq > g_seq_last + 1) g_seq_drop += seq - g_seq_last - 1;
 	g_seq_last = seq;
+	meta_emit(seq);
 }
 static int g_hae = 0, g_hae_log = 0; static double g_hae_T = 0, g_hae_target = 118, g_hae_clip = 0.010;   // A7Z_HAE=1: highlight-aware exposure, replaces libisp's exposure request (it cannot be steered: target/bias controls are inert)
 static int g_hae_exp = 0, g_hae_gain = 0;
@@ -118,7 +172,12 @@ int ioctl(int fd, unsigned long req, ...)
 			long long g = (long long)eg->gain_val * eg->exp_val / g_maxexp; if (g > g_maxgain) g = g_maxgain;
 			if (g > eg->gain_val) { eg->exp_val = (int)((long long)eg->exp_val * eg->gain_val / g); eg->gain_val = (int)g; }
 		}
+		if (g_expstep) {                                       // A7Z_EXPSTEP=1 (latency measurement): alternate full / half exposure on every libisp command and log the frame sequence at that moment
+			static int tog; tog ^= 1; if (tog) eg->exp_val = eg->exp_val / 2 > 40 ? eg->exp_val / 2 : 40;
+			fprintf(stderr, "[a7zcap] STEP call seq=%u exp=%d gain=%d half=%d\n", g_seq_last, eg->exp_val, eg->gain_val, tog);
+		}
 		if (g_rmul != 1.0 || g_bmul != 1.0) { eg->r_gain = (int)(eg->r_gain * g_rmul + 0.5); eg->b_gain = (int)(eg->b_gain * g_bmul + 0.5); }
+		{ unsigned i = g_eh_n; g_eh[i % MH] = (struct mexp){ g_seq_last, eg->exp_val, eg->gain_val, eg->r_gain, eg->b_gain }; g_eh_n = i + 1; }
 		if (getenv("A7Z_EXPLOG")) fprintf(stderr, "[a7zcap] EXPGAIN exp=%d gain=%d r=%d b=%d\n", eg->exp_val, eg->gain_val, eg->r_gain, eg->b_gain);
 	}
 	if (g_block_isp_lens && !g_my_lens_call && (req == VIDIOC_VIN_ACT_SET_CODE || req == VIDIOC_VIN_ACT_INIT)) return 0;
@@ -131,6 +190,7 @@ static void set_lens(int code)
 {
 	if (g_sfd < 0 || getenv("A7Z_AF_NOLENS")) return;
 	struct actuator_ctrl ac = { .code = (unsigned)code };
+	{ unsigned i = g_lh_n; g_lh[i % MH] = (struct mlens){ g_seq_last, code }; g_lh_n = i + 1; }
 	struct timespec ta, tb; clock_gettime(CLOCK_MONOTONIC, &ta);
 	g_my_lens_call = 1; ioctl(g_sfd, VIDIOC_VIN_ACT_SET_CODE, &ac); g_my_lens_call = 0;
 	clock_gettime(CLOCK_MONOTONIC, &tb); g_lens_ms += (tb.tv_sec - ta.tv_sec) * 1e3 + (tb.tv_nsec - ta.tv_nsec) * 1e-6; g_lens_calls++;
@@ -743,6 +803,9 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_HAE_TARGET")) g_hae_target = atof(getenv("A7Z_HAE_TARGET"));
 	if (getenv("A7Z_HAE_CLIP")) g_hae_clip = atof(getenv("A7Z_HAE_CLIP"));
 	if (getenv("A7Z_MAXEXP")) g_maxexp = atoi(getenv("A7Z_MAXEXP"));
+	if (getenv("A7Z_EXPSTEP")) g_expstep = 1;
+	if (getenv("A7Z_EXPLAT")) g_explat = atoi(getenv("A7Z_EXPLAT"));
+	meta_open();
 	if (getenv("A7Z_MAXGAIN")) g_maxgain = atoi(getenv("A7Z_MAXGAIN"));
 	if (getenv("A7Z_AF_EXPDIV")) g_af_expdiv = atoi(getenv("A7Z_AF_EXPDIV"));
 	if (getenv("A7Z_AF_GAINMAX")) g_af_gainmax = atoi(getenv("A7Z_AF_GAINMAX"));
@@ -846,6 +909,7 @@ int main(int argc, char **argv)
 			}
 		}
 		seq_track(b.sequence);
+		if (g_expstep) { const unsigned char *yp = mp[b.index][0]; long s = 0, n = 0; for (int r = gh / 4; r < gh * 3 / 4; r += 16) for (int c = gw / 4; c < gw * 3 / 4; c += 16, n++) s += yp[(size_t)r * gw + c]; fprintf(stderr, "[a7zcap] STEP frame seq=%u luma=%.2f\n", b.sequence, (double)s / n); }
 		if (merge_mode && ++merge_checked <= 3) {   // 2-in-1 start-up check: some starts come up with the LEFT ISP half empty for the whole run (and AE then blows out the right half)
 			const unsigned char *yp = mp[b.index][0]; long ls = 0, rs = 0, n = 0;
 			for (int r = gh / 16; r < gh - gh / 16; r += gh / 48) for (int c = 0; c < gw / 2; c += 8, n++) { ls += yp[(size_t)r * gw + c]; rs += yp[(size_t)r * gw + gw / 2 + c]; }

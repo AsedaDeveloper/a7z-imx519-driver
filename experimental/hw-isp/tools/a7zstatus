@@ -89,6 +89,24 @@ def from_log(lines):
     return out
 
 
+def live_meta(path=os.environ.get("A7Z_METARING", "/run/a7zcam.meta")):
+    """Newest per-frame record from the feeder's metadata ring: what the sensor and lens are doing right now."""
+    import mmap, struct
+    try:
+        with open(path, "rb") as f:
+            m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        magic, ver, slots, rec = struct.unpack_from("<IIII", m, 0)
+        head = struct.unpack_from("<Q", m, 16)[0]
+        if magic != 0x4d5a3741 or head == 0:
+            return None
+        o = 32 + ((head - 1) % slots) * rec
+        ts, seq, exp, gain, code, r, b, flags, dpt = struct.unpack_from("<QIIIIIIIf", m, o)
+        return {"exp_us": exp, "gain_x": round(gain / 16, 2), "lens_dpt": round(dpt, 2), "r_gain": r, "b_gain": b,
+                "age_ms": round((time.clock_gettime_ns(time.CLOCK_MONOTONIC) - ts) / 1e6), "af_sweeping": bool(flags & 1), "lens_held": bool(flags & 2)}
+    except (OSError, ValueError, struct.error):
+        return None
+
+
 def thermal():
     t = {}
     base = "/sys/class/thermal"
@@ -172,6 +190,9 @@ def verdict(rep):
         bad.append("%.0f C" % hot)
     elif hot > 70:
         warn.append("%.0f C" % hot)
+    M = rep.get("meta")
+    if M and M["age_ms"] > 1000 and s["state"].startswith("active/running"):
+        warn.append("metadata is %d ms old: the feeder has stopped producing frames" % M["age_ms"])
     p = rep.get("probe")
     if p is not None:
         if "error" in p:
@@ -187,7 +208,7 @@ def verdict(rep):
 
 
 def main():
-    rep = {"service": service(), "log": from_log(tail_lines(LOG)), "thermal": thermal(), "cpu": cpu()}
+    rep = {"service": service(), "log": from_log(tail_lines(LOG)), "meta": live_meta(), "thermal": thermal(), "cpu": cpu()}
     starting_now = rep["service"]["uptime_s"] is not None and rep["service"]["uptime_s"] < 30
     publishing = bool(rep["log"]["health"] and rep["log"]["health"]["frames"] > 0) and not rep["log"]["loopback_error"]
     # probing an idle node would itself wedge it (see a7zstream.sh reload_lb), so only read from a node the feeder is publishing to
@@ -210,6 +231,9 @@ def main():
             print("  image      %.1f fps at the node   luma %.0f   clipped %.2f%%   black %.2f%%   R/G %s  B/G %s" % (p["fps"], p["luma_mean"], p["clipped_pct"], p["black_pct"], p.get("rg", "-"), p.get("bg", "-")))
         elif p:
             print("  image      %s" % p["error"])
+        M = rep["meta"]
+        if M:
+            print("  sensor     exposure %.1f ms   gain %.2fx   lens %.2f dpt%s%s   (newest record %d ms old)" % (M["exp_us"] / 1000, M["gain_x"], M["lens_dpt"], "  [sweeping]" if M["af_sweeping"] else "", "  [held]" if M["lens_held"] else "", M["age_ms"]))
         t = rep["thermal"]
         print("  temps      " + "  ".join("%s %.0f" % kv for kv in t.items()) + " C")
         print("  cpu        %s MHz   load %s" % ("/".join(map(str, rep["cpu"]["mhz"])), " ".join(rep["cpu"]["load"])))

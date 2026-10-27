@@ -63,8 +63,8 @@ Eight refocuses, no drop bursts, no dip below 30.0 fps.
 a live 30-frame read of `/dev/video9` (rate, mean luma, clipped %, black %, R/G and B/G of the whole frame), temperatures, CPU clocks, libisp error counts and the
 supervisor's recent events. `--json` gives the same for scripts, `--no-probe` skips the frame read. Exit 0 healthy, 1 warning or still starting (first 30 s), 2 failed.
 
-**Not covered yet:** exposure and gain (the sensor subdev's controls only ever show their defaults, 1000 and 16, so they are not live values; `a7zcap` would have to log
-them from the ISP) and MIPI link errors (needs B6). That is why C11 is not ticked.
+**Exposure, gain and lens position** now come from the per-frame metadata ring (B18, METADATA.md); the sensor subdev's own controls only ever show their defaults. **Not covered yet:**
+MIPI link errors (needs B6), which is why C11 is not ticked.
 
 **The trap.** While testing the failure path, the service looked healthy (`active`, no restarts) but published nothing: `a7zcap` logged `loopback S_FMT: Invalid argument`
 and carried on with the loopback fd set to -1. Cause: a reader that opens `/dev/video9` while the feeder is not running (a camera app at boot, or the status probe itself)
