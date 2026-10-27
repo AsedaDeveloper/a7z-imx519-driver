@@ -34,6 +34,7 @@ not listed here has not been measured. The running tally is in [CHECKLIST.md](CH
 | 2D engine (G2D) | `/dev/g2d` accepts a scale and writes nothing, in four variants |
 | NPU | device node present, no userspace runtime installed |
 | Translation of the ISP tuning to another module | everything here is one IMX519 on one board |
+| Dual-camera sync | impossible on this board: one camera connector (J5), and the 16 MP mode already uses both ISP instances |
 
 ## The one flaw to know about
 Roughly **one full-resolution (2-in-1) start in three comes up with the left ISP half empty** for the whole run, and auto exposure then blows out the right half.
