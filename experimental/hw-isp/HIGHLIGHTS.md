@@ -39,7 +39,7 @@ free. Nothing is given up.
 
 ## A1 is not finished
 A third fewer clipped pixels is not real highlight protection — a bright window would still blow out. What is still missing:
-* which stage flag 24 actually is — **two attempts failed**:
+* which stage flag 24 actually is — **answered Oct 27: `defog_en`** (see tuning/ISP_STAGES.md; the two attempts below failed, the vendor struct layout settled it):
   1. The main enable path (`__isp_ctx_apply_enable`) maps each flag byte to a module-enable bit, but three of the thirty-two bytes, including the one flag 24
      writes, are absent from that table. So it is configured elsewhere, which is consistent with a stage carrying its own config such as PLTM, but that is
      inference, not proof.
