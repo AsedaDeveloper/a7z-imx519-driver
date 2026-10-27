@@ -27,7 +27,7 @@ OpenCV: `cap.set(cv2.CAP_PROP_AUTOFOCUS, 0); cap.set(cv2.CAP_PROP_FOCUS, 900)`.
 
 * `focus_absolute` is in **hundredths of a dioptre**, 0..1200 (0..12 dpt). Reading it gives the lens position (the feeder writes the autofocus result back into it).
 * `focus_automatic_continuous` 1 = the autofocus watcher is in charge (default), 0 = lens held. Setting it to 0 and then a value, back to back as OpenCV does, is handled.
-* How: `kernel/v4l2loopback-focus.patch` (v4l2loopback 0.12.7, 12 lines) registers the two controls and only stores them; `a7zcap` reads them back on its own output fd every third frame
+* How: `kernel/v4l2loopback-focus.patch` (v4l2loopback 0.12.7, 11 lines) registers the two controls and only stores them; `a7zcap` reads them back on its own output fd every third frame
   (`lbctl_poll`) and does what the control file would. With an unpatched loopback the feeder logs once and stops polling, and the control file keeps working.
 * Install: apply the patch, `make -C /lib/modules/$(uname -r)/build M=$PWD modules`, stop the service, `rmmod v4l2loopback`, copy the `.ko` over
   `/lib/modules/$(uname -r)/extra/v4l2loopback.ko`, `depmod -a`, start the service.
