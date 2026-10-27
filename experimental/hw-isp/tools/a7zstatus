@@ -107,6 +107,29 @@ def live_meta(path=os.environ.get("A7Z_METARING", "/run/a7zcam.meta")):
         return None
 
 
+# The combo-CSI port's channel-0 interrupt-pending word. The driver never enables or clears these interrupts, so the error bits are sticky: cleared when the
+# receiver powers up at stream start, then latched for the rest of the run. See B6 in LINK.md. Reading it needs /dev/mem, i.e. root; without it the line is skipped.
+MIPI_PD = 0x5811400 + 0x118
+MIPI_ERRBITS = {7: "frame_sync", 8: "line_sync", 9: "ecc_warning", 10: "ecc_error", 11: "checksum", 12: "eot"}
+
+
+def link():
+    import mmap, struct
+    try:
+        fd = os.open("/dev/mem", os.O_RDONLY | os.O_SYNC)
+    except OSError:
+        return None
+    try:
+        m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ, offset=MIPI_PD & ~0xfff)
+        v = struct.unpack_from("<I", m, MIPI_PD & 0xfff)[0]
+        m.close()
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+    return {"int_pd": v, "errors": [n for b, n in MIPI_ERRBITS.items() if v >> b & 1], "streaming": bool(v)}
+
+
 def thermal():
     t = {}
     base = "/sys/class/thermal"
@@ -193,6 +216,9 @@ def verdict(rep):
     M = rep.get("meta")
     if M and M["age_ms"] > 1000 and s["state"].startswith("active/running"):
         warn.append("metadata is %d ms old: the feeder has stopped producing frames" % M["age_ms"])
+    K = rep.get("link")
+    if K and [e for e in K["errors"] if e in ("ecc_error", "frame_sync", "line_sync", "eot")]:
+        warn.append("MIPI link latched " + ", ".join(K["errors"]) + " (see LINK.md)")
     p = rep.get("probe")
     if p is not None:
         if "error" in p:
@@ -208,7 +234,7 @@ def verdict(rep):
 
 
 def main():
-    rep = {"service": service(), "log": from_log(tail_lines(LOG)), "meta": live_meta(), "thermal": thermal(), "cpu": cpu()}
+    rep = {"service": service(), "log": from_log(tail_lines(LOG)), "meta": live_meta(), "link": link(), "thermal": thermal(), "cpu": cpu()}
     starting_now = rep["service"]["uptime_s"] is not None and rep["service"]["uptime_s"] < 30
     publishing = bool(rep["log"]["health"] and rep["log"]["health"]["frames"] > 0) and not rep["log"]["loopback_error"]
     # probing an idle node would itself wedge it (see a7zstream.sh reload_lb), so only read from a node the feeder is publishing to
@@ -234,6 +260,9 @@ def main():
         M = rep["meta"]
         if M:
             print("  sensor     exposure %.1f ms   gain %.2fx   lens %.2f dpt%s%s   (newest record %d ms old)" % (M["exp_us"] / 1000, M["gain_x"], M["lens_dpt"], "  [sweeping]" if M["af_sweeping"] else "", "  [held]" if M["lens_held"] else "", M["age_ms"]))
+        K = rep.get("link")
+        if K:
+            print("  mipi link  int_pd 0x%03x   latched errors this run: %s" % (K["int_pd"], ", ".join(K["errors"]) or "none"))
         t = rep["thermal"]
         print("  temps      " + "  ".join("%s %.0f" % kv for kv in t.items()) + " C")
         print("  cpu        %s MHz   load %s" % ("/".join(map(str, rep["cpu"]["mhz"])), " ".join(rep["cpu"]["load"])))

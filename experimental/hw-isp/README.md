@@ -82,6 +82,9 @@ What limits it, measured on one module and one 15-pin cable:
 
 (Each figure is one frame of a bright indoor scene; see the caveats below.)
 
+* **The receiver's own error bits agree, and flag the default.** The combo-CSI channel-0 interrupt-pending word latches `ecc_warn` at 1344 Mbit/s — the first rate
+  where the image metric degrades — and `ecc_err` + `frame_sync_err` at 1368. At the 1296 default it latches `chksum_err` where the stock 816 mode latches nothing,
+  so the default has less margin than the picture suggests. See [LINK.md](LINK.md) and `tools/link_ladder.py`.
 * **The link, not the ISP, is the limit.** The module has two lanes. A frame carries ~81 Mbit per lane, so ~1.35 Gbit/s gives ~16 fps at best.
 * **Frames keep arriving while the picture is damaged.** Counting frames or watching the kernel log tells you nothing; score the image with
   `tools/corruption_check.py`. The errors are data dependent (they show up at certain brightness values), so a flat test patch can pass
