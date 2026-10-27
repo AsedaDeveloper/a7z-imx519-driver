@@ -3,7 +3,7 @@
 # Two modes:
 #   A7Z_NODE=/dev/videoN   publish to that v4l2loopback node (what the systemd service uses)
 #   unset                  write H.264 to stdout (for piping to a player)
-# a7zcap exits 3 = encoder wedged (needs a sunxi_ve reload), 4 = no frames for 3 s, other = crash/kill/device busy.
+# a7zcap exits 3 = encoder wedged (needs a sunxi_ve reload), 4 = no frames for 3 s, 5 = loopback node unusable (reload v4l2loopback), other = crash/kill/device busy.
 W=${1:-1920} H=${2:-1080} FPS=${3:-30} KBPS=${4:-6000}
 NODE=${A7Z_NODE:-}
 LOG=${A7Z_LOG:-/tmp/a7zstream.log}
@@ -16,8 +16,11 @@ flock -n 9 || { echo "another supervisor is already running" >&2; exit 1; }   # 
 pkill -9 -x a7zcap.enc 2>/dev/null; sleep 1        # -x (exact name): a -f pattern also matches the shell running this script
 
 reload_ve() { rmmod sunxi_ve 2>/dev/null; modprobe sunxi_ve; sleep 1; }
+# A reader that opens the idle node before the feeder does (a browser, a camera app at boot) leaves it refusing the feeder's S_FMT; a fresh module cures it.
+reload_lb() { [ -n "$NODE" ] || return 0; rmmod v4l2loopback 2>/dev/null; modprobe v4l2loopback; sleep 1; }
 echo "$(date -Is) supervisor start ${W}x${H} ${FPS}fps ${KBPS}kbps node=${NODE:-stdout}" >> "$LOG"
 reload_ve
+reload_lb
 while :; do
   rm -f "$CTX"                                     # libisp reloads stale ISP state over the tuning table otherwise
   if [ -n "$NODE" ]; then
@@ -33,6 +36,7 @@ while :; do
     0)  echo "$(date -Is) clean exit" >> "$LOG"; break;;
     3)  echo "$(date -Is) RESTART $tries: encoder wedged (rc=3), reloading sunxi_ve" >> "$LOG"; reload_ve;;
     4)  echo "$(date -Is) RESTART $tries: stream stalled (rc=4)" >> "$LOG";;
+    5)  echo "$(date -Is) RESTART $tries: loopback node unusable (rc=5), reloading v4l2loopback" >> "$LOG"; reload_lb;;
     *)  echo "$(date -Is) RESTART $tries: exit rc=$rc" >> "$LOG"; sleep 2;;
   esac
   sleep 1

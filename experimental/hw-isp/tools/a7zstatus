@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""a7zstatus - one-screen health report for the IMX519 camera service (checklist C11).
+
+    a7zstatus            human-readable report
+    a7zstatus --json     the same facts as JSON (for scripts / monitoring)
+    a7zstatus --no-probe skip the live frame grab (use while something else holds /dev/video9 exclusively)
+
+Sources: systemd (service state, restarts), /var/log/a7z-camera.log (HEALTH, AF and supervisor lines written by a7zcap/a7zstream.sh),
+/sys thermal + cpufreq, and a short live read of /dev/video9 for rate, brightness, clipping and colour balance.
+Needs no sudo for a user in the video group, except the log (readable by all) and systemctl show (unprivileged).
+Exit status: 0 healthy, 1 warnings (or still starting), 2 service down or no frames.
+"""
+import json, os, re, subprocess, sys, time
+
+LOG = os.environ.get("A7Z_LOG", "/var/log/a7z-camera.log")
+NODE = os.environ.get("A7Z_NODE", "/dev/video9")
+UNIT = "a7z-camera"
+
+
+def sh(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+
+def tail_lines(path, nbytes=2_000_000):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - nbytes))
+            return f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def service():
+    show = dict(l.split("=", 1) for l in sh("systemctl", "show", UNIT, "-p", "ActiveState,SubState,NRestarts,ExecMainStartTimestampMonotonic,MainPID").splitlines() if "=" in l)
+    up = None
+    try:
+        start = int(show.get("ExecMainStartTimestampMonotonic", "0")) / 1e6
+        up = time.clock_gettime(time.CLOCK_MONOTONIC) - start if start and show.get("ActiveState") == "active" else None
+    except Exception:
+        pass
+    return {"state": show.get("ActiveState", "?") + "/" + show.get("SubState", "?"), "restarts": int(show.get("NRestarts", "0") or 0),
+            "pid": show.get("MainPID"), "uptime_s": round(up) if up else None}
+
+
+def from_log(lines):
+    # only the current feeder run: from the last "control file" / start banner onwards
+    start = 0
+    for i, l in enumerate(lines):
+        if "[a7zcap] loopback" in l:
+            start = i
+    run = lines[start:]
+    if run and "[a7zcap] loopback" in run[0] and "[a7zcap] loopback:" not in run[0]:
+        loopback_bad = run[0].strip()
+    else:
+        loopback_bad = None
+    out = {"health": None, "seqdrops": 0, "stale": 0, "min_fps": None, "af_count": 0, "af_last": None, "lens_dpt": None, "isp_errors": {}, "supervisor": []}
+    fps = []
+    for l in run:
+        m = re.search(r"HEALTH frames=(\d+) fps=([\d.]+) seqdrops=(\d+) stale=(\d+)", l)
+        if m:
+            out["health"] = {"frames": int(m[1]), "fps": float(m[2])}
+            out["seqdrops"], out["stale"] = int(m[3]), int(m[4])
+            if int(m[1]) > 90:              # ignore the first seconds, before the stream has settled
+                fps.append(float(m[2]))
+        m = re.search(r"AF: best lens code (\d+) \(([\d.]+) dioptre\), sharpness ([\d.]+)", l)
+        if m:
+            out["af_count"] += 1
+            out["af_last"] = {"dpt": float(m[2]), "sharpness": float(m[3])}
+        m = re.search(r"CTL focus ([\d.]+) dpt", l)
+        if m:
+            out["lens_dpt"] = float(m[1])
+        m = re.search(r"\[ISP_ERR\](\w+)", l)
+        if m:
+            out["isp_errors"][m[1]] = out["isp_errors"].get(m[1], 0) + 1
+    if out["af_last"] and out["lens_dpt"] is None:
+        out["lens_dpt"] = out["af_last"]["dpt"]
+    out["loopback_error"] = loopback_bad
+    if fps:
+        out["min_fps"] = min(fps)
+    last_start = max([i for i, l in enumerate(lines) if "supervisor start" in l] or [0])
+    for l in lines[last_start:]:
+        if re.search(r"a7zstream|supervisor|wedged|stalled|reload|restart", l, re.I) and "[ISP" not in l:
+            out["supervisor"].append(l.strip()[:120])
+    out["supervisor"] = out["supervisor"][-4:]
+    return out
+
+
+def thermal():
+    t = {}
+    base = "/sys/class/thermal"
+    for z in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        if z.startswith("thermal_zone"):
+            try:
+                name = open(f"{base}/{z}/type").read().strip().replace("_thermal_zone", "").replace("_zone", "")
+                t[name] = int(open(f"{base}/{z}/temp").read()) / 1000
+            except Exception:
+                pass
+    return t
+
+
+def cpu():
+    freqs = []
+    for i in range(16):
+        p = f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq"
+        if os.path.exists(p):
+            freqs.append(int(open(p).read()) // 1000)
+    load = open("/proc/loadavg").read().split()[:3]
+    return {"mhz": freqs, "load": load}
+
+
+def probe(n=30, w=1920, h=1080):
+    """Read n frames from the loopback node; report rate, brightness, clipping and the R/G, B/G balance of the whole frame."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    for cand in (os.path.dirname(os.path.abspath(__file__)), os.path.expanduser("~"), "/usr/local/lib"):
+        if os.path.exists(os.path.join(cand, "a7z_v4l2.py")):
+            sys.path.insert(0, cand)
+            break
+    try:
+        from a7z_v4l2 import Camera
+    except Exception as e:
+        return {"error": "a7z_v4l2.py not found (%s)" % e}
+    try:
+        with Camera(NODE, w, h) as cam:
+            for _ in range(3):
+                cam.read()
+            t0 = time.monotonic()
+            for _ in range(n - 1):
+                cam.read()
+            dt = time.monotonic() - t0
+            y, u, v = cam.read()
+    except Exception as e:
+        return {"error": str(e)}
+    r = {"fps": round((n - 1) / dt, 1)}
+    ys = bytes(y[::7])
+    r["luma_mean"] = round(sum(ys) / len(ys), 1)
+    r["clipped_pct"] = round(100 * sum(1 for b in ys if b >= 250) / len(ys), 2)
+    r["black_pct"] = round(100 * sum(1 for b in ys if b <= 8) / len(ys), 2)
+    um, vm = sum(bytes(u[::5])) / len(bytes(u[::5])) - 128, sum(bytes(v[::5])) / len(bytes(v[::5])) - 128
+    ym = r["luma_mean"]
+    R, G, B = ym + 1.402 * vm, ym - 0.344136 * um - 0.714136 * vm, ym + 1.772 * um
+    if G > 1:
+        r["rg"], r["bg"] = round(R / G, 2), round(B / G, 2)
+    r["dark"] = ym < 12
+    return r
+
+
+def verdict(rep):
+    warn, bad = [], []
+    s = rep["service"]
+    if not s["state"].startswith("active/running"):
+        bad.append("service %s" % s["state"])
+    if s["restarts"] > 0:
+        warn.append("%d service restart(s)" % s["restarts"])
+    L = rep["log"]
+    if L["loopback_error"]:
+        bad.append("feeder cannot publish to the node (%s)" % L["loopback_error"].replace("[a7zcap] ", ""))
+    if L["seqdrops"]:
+        warn.append("%d dropped frame(s) since the feeder started" % L["seqdrops"])
+    if L["stale"]:
+        warn.append("%d stale frame(s)" % L["stale"])
+    if L["min_fps"] is not None and L["min_fps"] < 29:
+        warn.append("rate dipped to %.1f fps" % L["min_fps"])
+    errs = {k: v for k, v in L["isp_errors"].items() if v > 20}
+    if errs:
+        warn.append("libisp errors: " + ", ".join("%s x%d" % kv for kv in errs.items()))
+    hot = max(rep["thermal"].values(), default=0)
+    if hot > 80:
+        bad.append("%.0f C" % hot)
+    elif hot > 70:
+        warn.append("%.0f C" % hot)
+    p = rep.get("probe")
+    if p is not None:
+        if "error" in p:
+            bad.append("no frames: " + p["error"])
+        else:
+            if p["fps"] < 25:
+                warn.append("node delivers only %.1f fps" % p["fps"])
+            if p["clipped_pct"] > 5:
+                warn.append("%.1f%% of the frame is clipped" % p["clipped_pct"])
+            if p["dark"]:
+                warn.append("scene is very dark (mean luma %.0f)" % p["luma_mean"])
+    return bad, warn
+
+
+def main():
+    rep = {"service": service(), "log": from_log(tail_lines(LOG)), "thermal": thermal(), "cpu": cpu()}
+    starting_now = rep["service"]["uptime_s"] is not None and rep["service"]["uptime_s"] < 30
+    publishing = bool(rep["log"]["health"] and rep["log"]["health"]["frames"] > 0) and not rep["log"]["loopback_error"]
+    # probing an idle node would itself wedge it (see a7zstream.sh reload_lb), so only read from a node the feeder is publishing to
+    if "--no-probe" not in sys.argv and not starting_now and rep["service"]["state"].startswith("active/running") and publishing:
+        rep["probe"] = probe()
+    bad, warn = verdict(rep)
+    starting = rep["service"]["uptime_s"] is not None and rep["service"]["uptime_s"] < 30 and rep["service"]["state"].startswith("active")
+    rep["status"] = "STARTING" if starting else "FAIL" if bad else "WARN" if warn else "OK"
+    rep["problems"] = bad + warn
+    if "--json" in sys.argv:
+        print(json.dumps(rep, indent=1))
+    else:
+        s, L, p = rep["service"], rep["log"], rep.get("probe")
+        print("A7Z camera   %s" % rep["status"])
+        print("  service    %s   up %s   restarts %d" % (s["state"], ("%dh%02dm" % (s["uptime_s"] // 3600, s["uptime_s"] // 60 % 60)) if s["uptime_s"] else "?", s["restarts"]))
+        h = L["health"]
+        print("  feeder     %s frames   %s fps now, %s fps worst   dropped %d   stale %d" % (h["frames"] if h else "?", h["fps"] if h else "?", L["min_fps"] if L["min_fps"] else "?", L["seqdrops"], L["stale"]))
+        print("  autofocus  %d run(s) this session   lens %s dpt   last sharpness %s" % (L["af_count"], L["lens_dpt"] if L["lens_dpt"] is not None else "?", L["af_last"]["sharpness"] if L["af_last"] else "?"))
+        if p and "error" not in p:
+            print("  image      %.1f fps at the node   luma %.0f   clipped %.2f%%   black %.2f%%   R/G %s  B/G %s" % (p["fps"], p["luma_mean"], p["clipped_pct"], p["black_pct"], p.get("rg", "-"), p.get("bg", "-")))
+        elif p:
+            print("  image      %s" % p["error"])
+        t = rep["thermal"]
+        print("  temps      " + "  ".join("%s %.0f" % kv for kv in t.items()) + " C")
+        print("  cpu        %s MHz   load %s" % ("/".join(map(str, rep["cpu"]["mhz"])), " ".join(rep["cpu"]["load"])))
+        if L["isp_errors"]:
+            print("  libisp     " + ", ".join("%s x%d" % kv for kv in sorted(L["isp_errors"].items(), key=lambda kv: -kv[1])[:4]))
+        for m in L["supervisor"]:
+            print("  supervisor %s" % m)
+        for m in rep["problems"]:
+            print("  ! " + m)
+    sys.exit(2 if bad else 1 if warn else 0)
+
+
+if __name__ == "__main__":
+    main()

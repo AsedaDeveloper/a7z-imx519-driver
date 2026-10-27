@@ -51,7 +51,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] C8 Thermal and power behaviour in a closed case at full load; clock pinning versus power draw
 - [ ] C9 Accurate timestamps / shared clock for the balloon and observatory logs
 - [ ] C10 Dual-camera sync
-- [ ] C11 One diagnostics tool (drops, link errors, exposure, white balance, autofocus state)
+- [ ] C11 One diagnostics tool (drops, link errors, exposure, white balance, autofocus state) **Oct 27: partial — `tools/a7zstatus` (human + `--json`, exit codes) reports service, drops, rate, autofocus, live frame stats and white-balance ratios, temperatures, libisp errors; exposure/gain (sensor controls only show defaults) and MIPI link errors (B6) are not covered. Building it found and fixed a silent failure: a feeder with no loopback ran "healthy" and published nothing; a7zcap now exits 5 and the supervisor reloads the loopback. See STABILITY.md**
 ### C-3 Project side
 - [ ] C12 Documentation of what is verified, plus the soak-test script (see B7)
 - [ ] C13 Clean the driver for the Radxa / mainline kernel (upstreaming)

@@ -57,3 +57,17 @@ by autofocus looked like sequence gaps. `seq_track()` is now called from both lo
 | restarts / errors | 0 / 0 | 0 / 0 |
 
 Eight refocuses, no drop bursts, no dip below 30.0 fps.
+
+## One status command, and a trap it found (checklist C11, partial)
+`a7zstatus` (install to `/usr/local/bin`, needs no sudo) prints service state and restarts, the feeder's rate / dropped / stale counts, autofocus runs and lens position,
+a live 30-frame read of `/dev/video9` (rate, mean luma, clipped %, black %, R/G and B/G of the whole frame), temperatures, CPU clocks, libisp error counts and the
+supervisor's recent events. `--json` gives the same for scripts, `--no-probe` skips the frame read. Exit 0 healthy, 1 warning or still starting (first 30 s), 2 failed.
+
+**Not covered yet:** exposure and gain (the sensor subdev's controls only ever show their defaults, 1000 and 16, so they are not live values; `a7zcap` would have to log
+them from the ISP) and MIPI link errors (needs B6). That is why C11 is not ticked.
+
+**The trap.** While testing the failure path, the service looked healthy (`active`, no restarts) but published nothing: `a7zcap` logged `loopback S_FMT: Invalid argument`
+and carried on with the loopback fd set to -1. Cause: a reader that opens `/dev/video9` while the feeder is not running (a camera app at boot, or the status probe itself)
+leaves the node refusing the feeder's `S_FMT` until the module is reloaded. Fixed three ways, all verified by replaying the exact sequence (stop, reader touches the
+idle node, start): `a7zcap` now exits **5** if the loopback cannot be set up, `a7zstream.sh` reloads `v4l2loopback` on exit 5 and once at supervisor start, and
+`a7zstatus` reports the failure and never probes a node the feeder is not publishing to.

@@ -739,7 +739,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_FRESH")) g_fresh = 1;
 	if (getenv("A7Z_STDOUT")) g_outf = outf;
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
-	if (getenv("A7Z_LOOPBACK")) g_lb_fd = lb_open(getenv("A7Z_LOOPBACK"), gw, H);
+	if (getenv("A7Z_LOOPBACK") && (g_lb_fd = lb_open(getenv("A7Z_LOOPBACK"), gw, H)) < 0) return 5;   // publishing nowhere is a failure the supervisor must see (it reloads the loopback and retries)
 	if (getenv("A7Z_CTL")) { g_ctl_path = getenv("A7Z_CTL"); fprintf(stderr, "[a7zcap] control file: %s\n", g_ctl_path); }
 	if (getenv("A7Z_ISPLOG")) {                 // libisp keeps its verbosity in three exported ints; raising them makes it name each ISP stage it enables
 		int lv = atoi(getenv("A7Z_ISPLOG"));
