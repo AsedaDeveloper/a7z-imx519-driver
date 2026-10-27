@@ -54,3 +54,6 @@ lanes cannot carry it. Reaching a lower rate means lowering `fast_ivt` too (that
 * There is no **handling**: the driver does not enable these interrupts, so nothing reacts to a latched error. A real recovery path (reset the link, drop the rate)
   would be a driver change.
 * One module, one cable, one scene, short runs. The bits are a per-run summary, so a single rare error in an hour-long run looks the same as a thousand.
+
+## What the receiver carries (B17)
+`tools/mipi_types.py` samples the packet-header register of mipi1 while streaming. 2328x1748: 97%+ RAW10 lines of 2910 bytes, frame start/end, virtual channel 0 only. 4656x3496 (2-in-1): RAW10 lines of 5820 bytes, same. No embedded-data (0x12) or vendor data types, no second virtual channel, in 4.3-9.1 million samples; debugfs `/sys/kernel/debug/mpp/mipi` shows the port configured for 1 channel. Phase-detect data therefore does not arrive as its own stream on this stack.
