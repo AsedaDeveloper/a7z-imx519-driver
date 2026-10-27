@@ -1,0 +1,113 @@
+# Full resolution, the 2-in-1 mode and the link limit
+
+Everything here was moved out of the folder README so that page can stay a front page. The text is the original measurements and caveats, unchanged except for formatting.
+For what is verified at a glance see [VERIFIED.md](VERIFIED.md); for the receiver's own error bits at each lane rate see [LINK.md](LINK.md); for every sensor mode see [MODES.md](MODES.md).
+
+## Why the sensor was stuck at 2328x1748 (the useful finding)
+
+`sensor_find_frame_size()` in the BSP first keeps only the modes whose `fps_fixed` equals the frame rate requested through
+`S_PARM`, then picks among those. Demo programs ask for 30 fps, so only the 30 fps mode is ever eligible, and other resolutions are
+produced by the VIPP scaler from it. Select a mode by asking for **its** frame rate: `A7Z_FPS=13 a7zcap 3264 2448 ...`.
+(9 = 4656x3496, 13 = 3264x2448, 18 = 3840x2160, 30 = 2328x1748, 60 = 1920x1080.)
+
+## Full 16 MP: the 2-in-1 mode
+
+The single ISP is limited to 3264 pixels per line (`vin_os.c: max_width = 3264`; `sunxi_isp.c` clamps the format to 3264 unless
+`large_image == 3`). Wider modes use the vendor "2-in-1" mode: the CSI parser splits one sensor stream into two overlapping halves,
+one per ISP, and both DMAs write into one buffer. **No kernel change is needed**, but three things must all be right
+(`userspace/a7zdual.c`):
+
+1. `SET_DMA_MERGE = 1` and open **only `/dev/video1`**. The driver forwards `S_INPUT`/`S_FMT`/`S_PARM` to `video0` itself (forcing
+   `large_image = 3`) and streams both pipelines. Opening both nodes yourself makes them fight over the media links (`sunxi_csi.1
+   setup link sunxi_tdm_rx.0 fail!`, because the media core refuses to change a link while its CSI is streaming).
+2. Request the sensor mode's own frame rate through `S_PARM` (see the table above).
+3. Call libisp's `ispSetIspLargeImage(id)` on **both** ISP instances before `ispStart`. The demo path never calls it. Without it the
+   pipeline delivers one or two frames and then stalls with `tdm0 rx0 buffer full`, at every size.
+
+```sh
+A7Z_MERGE=1 A7Z_FPS=15 ./a7zdual 4656 3496 20 /tmp/cap/full    # full 16 MP, 15 fps (A7Z_FPS=9: 9.4 fps, stock clocks)
+```
+
+### Sensor modes
+
+All seven declared modes run through the hardware ISP at their rated rate, and switching between them needs no driver reload. The catch is exposure, not the mode:
+libisp asks for ~30 ms in ordinary indoor light, which pins anything above ~33 fps, so 1280x720@85 and 1920x1080@60 need `A7Z_MAXEXP=8000` to reach 84.7 and 60.0 fps.
+See [MODES.md](MODES.md) and `tools/mode_matrix.py`.
+
+### Going faster than 9.4 fps at 16 MP
+
+The stock full-res mode runs the sensor at 816 Mbit/s per lane (9.44 fps). `A7Z_FPS=15` selects a second full-res mode whose clocks
+are module parameters (`/sys/module/imx519_mipi/parameters/fast_{ivt,iop,hts,vts}`, read at every stream start; try new values
+with `tools/sweep_fps.sh`). The defaults give **15.06 fps at 1296 Mbit/s per lane**; see [What was tested](#what-was-tested-and-what-that-does-not-show) for exactly what that claim rests on.
+What limits it, measured on one module and one 15-pin cable:
+
+| lane rate | fps | isolated outlier pixels per Mpx | picture |
+|---|---|---|---|
+| 1224 Mbit/s | 14.2 | 0.1 | clean |
+| 1296 Mbit/s | 15.06 | 0.1 | clean (default) |
+| 1344 Mbit/s | 15.6 | **143** | **a trace: looked clean by eye and to the magenta test, but the outlier count is already 1000x the floor** |
+| 1368 Mbit/s | 15.9 | 10,538 | damaged (scattered speckle) |
+| 1392 Mbit/s | 15.1 | 39,103 | visible magenta ring |
+| 1500 Mbit/s | 16.6 | 233,000 | badly damaged |
+| 1560 Mbit/s and up | no frames at all | | |
+
+(Each figure is one frame of a bright indoor scene; see the caveats below.)
+
+* **The receiver's own error bits agree, and flag the default.** The combo-CSI channel-0 interrupt-pending word latches `ecc_warn` at 1344 Mbit/s — the first rate
+  where the image metric degrades — and `ecc_err` + `frame_sync_err` at 1368. At the 1296 default it latches `chksum_err` where the stock 816 mode latches nothing,
+  so the default has less margin than the picture suggests. See [LINK.md](LINK.md) and `tools/link_ladder.py`.
+* **The link, not the ISP, is the limit.** The module has two lanes. A frame carries ~81 Mbit per lane, so ~1.35 Gbit/s gives ~16 fps at best.
+* **Frames keep arriving while the picture is damaged.** Counting frames or watching the kernel log tells you nothing; score the image with
+  `tools/corruption_check.py`. The errors are data dependent (they show up at certain brightness values), so a flat test patch can pass
+  while a gradient fails. Only a few indoor scenes (bright, dim, high-contrast) were tested for the defaults; a longer or different-scene soak would be wise before
+  trusting them on another module or a longer cable.
+* The IVT multiplier saturates at 511 (681 MHz pixel clock), and a frame length below 3572 stops the stream.
+
+### What was tested, and what that does not show
+
+| run | what was captured | what was checked |
+|---|---|---|
+| 16 MP at the defaults (`A7Z_FPS=15`) | one run of 300 frames, one bright, mostly smooth indoor scene | 300 frames delivered, 0 `buffer full` and 0 `frame lost` kernel messages, 15.06 fps measured over frames 5..300. **Only the 300th frame was scored** with `tools/corruption_check.py`: 0.0000% magenta, largest row-brightness jump 1.6 |
+| 3840x2160 (`A7Z_FPS=18`, stock clocks) | one run of 60 frames, the same kind of scene | 60 frames delivered, 0 `buffer full`, 18.02 fps measured. **Only the 60th frame was scored**, with the same formula adapted to that frame size (the script in `tools/` handles the 4656x3496 layout only): 0.0000% magenta, row jump 1.3 |
+| 16 MP at the defaults, a different scene | three 30-frame runs of a bottle scene (real pink/red label graphics in view) | last frame of each scored: 0.20-0.26% magenta, but only 5-8% of those pixels are in sparse neighbourhoods and the mask shows compact blobs on the label; the picture shows no ring, stripes or banding. This is real magenta content, not damage, **but a frame that contains real magenta cannot rule out a few hundred speckle pixels** |
+| 16 MP at the defaults, a dim scene | 300-, 100- and 150-frame runs (three separate runs) of a dim scene (mean luma 12-17 of 255, no zero pixels), plus a 60-frame run at the stock clocks (`A7Z_FPS=9`) as a control | 0 `buffer full`, 0 `frame lost`, 0 I2C errors. One frame per run scored: **0.0 outlier pixels per Mpx at the defaults and at the stock clocks alike**, row/column brightness jumps below 0.35. The default ran at only 11.1-11.3 fps here (stock 9.44): in dim light auto-exposure lengthens the exposure past the frame time, so the frame rate is scene dependent. A fully covered lens gives an all-zero picture after black-level subtraction and tests nothing |
+| 16 MP at the defaults, a high-contrast scene | six 60-frame runs alternating stock clocks (`A7Z_FPS=9`) and the default (three each), plus a 300-frame run of each, all on the same scene | 0 `buffer full`, 0 `frame lost`, 0 I2C errors. One frame per run scored: **stock 1.3-1.7 outliers per Mpx, default 1.7-2.4** (300-frame runs: 1.4 and 1.8). The default is consistently about 1 per Mpx (roughly 15 pixels a frame) above the control, against 143 at 1344 Mbit/s: effectively at the floor, but not identical to it. The default ran at 14.6-15.0 fps here |
+
+These checks are **limited to those scenes and those frames. They do not prove that every frame is free of errors.**
+
+* One frame per run was scored, not all of them. A rare, brief link error in another frame would not be seen.
+* Link errors depend on the pixel data, and the checker only looks for two symptoms (magenta speckle and row-brightness jumps). Other
+  patterns (very dark or fully saturated scenes, fine high-contrast detail, other colours) were not tested, and damage that does not
+  produce those symptoms would pass.
+* One module, one cable, one session, no long-duration or temperature test.
+* The default (1296 Mbit/s) scored at the floor (0.1 outliers per Mpx) in the scenes tested, but the next step up (1344, only 4% faster) already shows a
+  trace (143) and 1368 is clearly damaged. That is a small margin. Treat the default as a starting point: on your hardware, sweep with `tools/sweep_fps.sh`,
+  score several different scenes, and drop `fast_iop` if anything looks wrong.
+* `tools/corruption_check.py` counts **isolated outlier pixels** (a pixel more than 25 away from the mean of its four neighbours) and also checks
+  row-brightness jumps and magenta speckle. The outlier count is the sensitive one: it rises steeply and monotonically with lane rate (table above) and
+  caught the 1344 Mbit/s trace that the magenta test missed. It is still a heuristic. Very sharp detail (printed text, specular glints) also produces
+  outliers, so a score must be judged against a capture of the **same scene at the stock clocks** (`A7Z_FPS=9`): in an earlier bottle scene (glints and
+  label text) the default scored 49 per Mpx and no same-scene stock capture was taken; the later high-contrast scene with a proper control did not
+  reproduce it (2 per Mpx), so the 49 was most likely real detail, but that was not proven. The magenta test is unreliable in dim scenes (a low-light colour cast scored as "large magenta" even at the stock clocks) and is skipped there.
+
+The output file is raw planar 4:2:0 with **padded plane heights** (3504 luma rows for 3496), exactly as `bytesused` reports; decode it
+with the padded sizes or the chroma planes come out misaligned.
+
+## Live view at full resolution
+
+```sh
+A7Z_HOST=radxa@board userspace/liveview_full.sh          # full 4656x3496 at 15 fps (default)
+A7Z_HOST=radxa@board userspace/liveview_full.sh uhd      # 3840x2160 at 18 fps
+```
+
+The sensor, the ISP and the capture run at full size and frame rate; only the copy sent over the link is **decimated** (every 4th
+pixel for `full`, every 3rd for `uhd`), because a full 16 MP frame is 24 MB and 15 fps would need ~370 MB/s. The preview is 1164x874
+(about 23 MB/s over USB). The first ~10 s are frozen while autofocus scans; it refocuses if the picture stays soft. The streaming
+mode is `A7Z_STREAM=D` in `a7zdual`; full-resolution stills are the normal `a7zdual` capture.
+
+## Preview and capture-tool notes
+* `A7Z_STREAM_D=n` box-downscales the preview n x n (USB link ~10 MB/s: D=3 is 640x360 @ 30 fps, D=2 is 960x540 @ ~13 fps). The ISP output is full-range YUV: decode with `scale=in_range=pc`.
+* `A7Z_MAXEXP=<us>` caps exposure and raises gain instead (30000 keeps 30 fps in a dim room; more noise).
+* Autofocus watcher: block-based sharpness metric, local +-2 dpt sweep first (~0.6 s), full sweep on failure (~1 s), trigger below 0.95 / above 1.2 of the reference. `A7Z_AF_TEST_DEFOCUS=<dpt>` knocks the lens once to time the recovery.
+* `A7Z_HAE=1` highlight-aware exposure: replaces libisp's exposure request (its target/bias controls are inert). Sparse luma sample per frame; backs off when >1% of pixels clip (`A7Z_HAE_CLIP`), comes up toward mean luma `A7Z_HAE_TARGET` (118) only when nothing clips; frozen during autofocus; the first sweep waits for it to settle. `A7Z_HAE_LOG=1` prints it. **Off by default: it costs sharpness** (centre Laplacian variance 14.6 -> 9.2 in bright light, 13.4 -> 2.4-4.3 in dim light) because libisp keeps requesting more exposure than we apply and selects its noise reduction from that request. Use only when clipped highlights matter more than detail.
+* AF watcher: checks every 2nd frame, triggers after 3 low checks (2 if the drop is below 0.7) when sharpness falls below 0.90 of the reference (0.80 for ~3 s after a refocus that moved the lens <0.2 dpt: stops hunting inside the depth of field). While the last 3 readings still fluctuate (spread >0.12, a moving subject) it waits up to ~2 s for the scene to settle before sweeping, so it does not lock onto a wrong peak.

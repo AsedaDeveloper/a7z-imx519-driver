@@ -23,15 +23,18 @@ not listed here has not been measured. The running tally is in [CHECKLIST.md](CH
 | Frame timestamps are usable for logs | one `CLOCK_MONOTONIC` timebase; capture jitter +/-1.1 ms | the board's wall clock is not anchored — [TIMING.md](TIMING.md) |
 | Nothing overheats at full load | 15 min at 16 MP: 51 C peak, rate flat, no camera throttling | open air with the fan at full; no closed case, no power figure — [THERMAL.md](THERMAL.md) |
 | White balance | grey card in daylight: R/G 0.986, B/G 0.985 | warm and cool light not yet measured — CHECKLIST A2 |
-| Highlights | ISP stage flag 24 cuts clipped pixels ~32% for free | not real highlight protection — [HIGHLIGHTS.md](HIGHLIGHTS.md) |
+| Lens as a standard V4L2 control | `focus_absolute` 300 / 700 / 1100 puts the lens at 3.00 / 7.00 / 11.00 dpt (from the frame metadata); OpenCV `CAP_PROP_FOCUS` 500 / 900 gives 5.00 / 9.00 | needs the patched v4l2loopback; the kernel lens subdev still has no controls — [CONTROLS.md](CONTROLS.md) |
+| Auto exposure does not hunt | static scene 85 s: exposure x gain never moved; brightening settles in ~1.5 s with no overshoot; dimming overshoots once by 30% and settles in ~0.3 s | one light-transition trial each way, indoor torch only — [METADATA.md](METADATA.md) |
+| ISP stages by name | the 32 flag bytes are the vendor `isp_test_param` enable fields (`defog_en` = 24 etc.); header size and offset match the file; `sharp_en` off cut detail 23%, `gamma_en` off dropped mean luma 135 to 106 | the meaning of individual parameters inside each stage is not known — [tuning/ISP_STAGES.md](tuning/ISP_STAGES.md) |
+| 2D engine (G2D) | scales 1080p to 360p with mean error 0.3 of 255 in 9.6 ms (~1.5 ms CPU); NV12 to ARGB within 2 levels; 90 degree rotation correct | not used by the pipeline; scale plus rotate in one call fails — [G2D.md](G2D.md) |
+| Highlights | ISP stage flag 24 (`defog_en`) cuts clipped pixels ~32% for free | not real highlight protection; 16 tone-mapping parameters swept, none helped — [HIGHLIGHTS.md](HIGHLIGHTS.md) |
 
 ## Known not to work, or not done
 | Thing | State |
 |---|---|
 | Raw Bayer capture on this path | the ISP path lists Bayer formats but streams none; raw lives in the main repo's bypass driver, which cannot run at the same time |
-| Lens as a standard `FOCUS_ABSOLUTE` control | the actuator subdev exposes no controls; use `a7zfocus` — [CONTROLS.md](CONTROLS.md) |
-| The ISP's other stages (tone mapping, DRC, noise reduction) | 32 stage flags swept; one helps and is deployed, the rest are worse or blank the frame. Four routes to naming them all failed, and the V4L2 user controls are inert — [HIGHLIGHTS.md](HIGHLIGHTS.md) |
-| 2D engine (G2D) | `/dev/g2d` accepts a scale and writes nothing, in four variants |
+| Phase-detect autofocus | the receiver carries one RAW10 stream on virtual channel 0, no embedded or vendor data type, in two modes (4 to 9 million packet samples) — [LINK.md](LINK.md) |
+| Tuning the ISP's stages beyond on / off | the flags are named, but what each number inside the tone-mapping, sharpen and denoise arrays does is unknown; the V4L2 user controls (`sharpness`, `contrast` ...) are inert — [tuning/ISP_STAGES.md](tuning/ISP_STAGES.md) |
 | NPU | device node present, no userspace runtime installed |
 | Translation of the ISP tuning to another module | everything here is one IMX519 on one board |
 | Dual-camera sync | impossible on this board: one camera connector (J5), and the 16 MP mode already uses both ISP instances |
