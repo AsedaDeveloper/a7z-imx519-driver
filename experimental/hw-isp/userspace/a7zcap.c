@@ -692,6 +692,36 @@ static void ctl_poll(void)
 	}
 	fclose(f);
 }
+// ---- standard V4L2 focus controls on the loopback node (checklist B2) -------------------------------------------------
+// The patched v4l2loopback (kernel/v4l2loopback-focus.patch) stores V4L2_CID_FOCUS_AUTO and V4L2_CID_FOCUS_ABSOLUTE (hundredths of a
+// dioptre, 0..1200). Apps set them on /dev/video9 like on any camera; this reads them back on our own output fd every few frames:
+//     FOCUS_AUTO 1                      autofocus watcher in charge (the default)
+//     FOCUS_AUTO 0                      hold the lens where it is; FOCUS_ABSOLUTE then reads that position
+//     FOCUS_ABSOLUTE n  (with AUTO 0)   park the lens at n/100 dioptre
+// With an unpatched loopback the read fails once and the poll switches itself off.
+static int g_lbc_off, g_lbc_seen, g_lbc_auto = 1, g_lbc_abs;
+static int lbc_get(unsigned id, int *v) { struct v4l2_control c = { .id = id }; if (ioctl(g_lb_fd, VIDIOC_G_CTRL, &c) < 0) return -1; *v = c.value; return 0; }
+static void lbc_put(unsigned id, int v) { struct v4l2_control c = { .id = id, .value = v }; ioctl(g_lb_fd, VIDIOC_S_CTRL, &c); }
+static void lbctl_poll(void)
+{
+	static unsigned n;
+	if (g_lb_fd < 0 || g_lbc_off || (n++ % 3)) return;
+	int au, ab;
+	if (lbc_get(V4L2_CID_FOCUS_AUTO, &au) < 0 || lbc_get(V4L2_CID_FOCUS_ABSOLUTE, &ab) < 0) { g_lbc_off = 1; fprintf(stderr, "[a7zcap] loopback has no focus controls (unpatched v4l2loopback)\n"); return; }
+	if (!g_lbc_seen) { g_lbc_seen = 1; g_lbc_auto = au; g_lbc_abs = ab; return; }
+	if (au != g_lbc_auto) {
+		g_lbc_auto = au;
+		if (au) { g_af_paused = 0; fprintf(stderr, "[a7zcap] V4L2 FOCUS_AUTO 1: autofocus resumed\n"); }
+		else if (ab != g_lbc_abs) { g_af_paused = 1; g_lbc_abs = ab; g_af_dpt = ab / 100.0; set_lens(af_code(g_af_dpt)); fprintf(stderr, "[a7zcap] V4L2 FOCUS_AUTO 0 with FOCUS_ABSOLUTE %d: lens to %.2f dpt\n", ab, g_af_dpt); return; }   // apps (OpenCV) write both back to back
+		else { g_af_paused = 1; g_lbc_abs = (int)(g_af_dpt * 100 + 0.5); lbc_put(V4L2_CID_FOCUS_ABSOLUTE, g_lbc_abs); fprintf(stderr, "[a7zcap] V4L2 FOCUS_AUTO 0: lens held at %.2f dpt\n", g_af_dpt); return; }
+	}
+	if (ab != g_lbc_abs) {
+		g_lbc_abs = ab;
+		if (!au) { g_af_paused = 1; g_af_dpt = ab / 100.0; set_lens(af_code(g_af_dpt)); fprintf(stderr, "[a7zcap] V4L2 FOCUS_ABSOLUTE %d: lens to %.2f dpt\n", ab, g_af_dpt); }
+	} else if (au && abs((int)(g_af_dpt * 100 + 0.5) - ab) >= 2) {      // autofocus moved the lens: let a read of FOCUS_ABSOLUTE show where it is
+		g_lbc_abs = (int)(g_af_dpt * 100 + 0.5); lbc_put(V4L2_CID_FOCUS_ABSOLUTE, g_lbc_abs);
+	}
+}
 static void emit_frame(FILE *f, void *const planes[3], const struct v4l2_plane *pl, size_t ml0, int np, int gw, int gh)
 {
 	size_t l0 = pl[0].bytesused ? pl[0].bytesused : ml0;
@@ -916,6 +946,7 @@ int main(int argc, char **argv)
 			if (n && rs / n > 20 && ls / n < 3) { fprintf(stderr, "[a7zcap] 2-in-1 start failed: left half empty (luma L %ld, R %ld); restart the capture\n", ls / n, rs / n); return 6; }
 		}
 		ctl_poll();
+		lbctl_poll();
 		hae_step(mp[b.index][0], gw, gh);
 		if (getenv("A7Z_HEALTH")) {              // one line a second: frames, driver sequence gaps (dropped frames) and measured rate
 			static struct timespec hp; static long hf0;

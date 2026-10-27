@@ -1,0 +1,27 @@
+--- a/v4l2loopback.c
++++ b/v4l2loopback.c
+@@ -269,6 +269,15 @@
+ #define CID_TIMEOUT_IMAGE_IO (V4L2LOOPBACK_CID_BASE + 3)
+ 
+ static int v4l2loopback_s_ctrl(struct v4l2_ctrl *ctrl);
++/* Camera-class focus controls. v4l2loopback only stores them; the producer (a7zcap) reads them back with VIDIOC_G_CTRL on its own
++ * file descriptor and moves the lens. FOCUS_ABSOLUTE is in hundredths of a dioptre (0..1200 = 0..12 dpt). */
++static int v4l2loopback_focus_s_ctrl(struct v4l2_ctrl *ctrl)
++{
++	return 0;
++}
++static const struct v4l2_ctrl_ops v4l2loopback_focus_ops = {
++	.s_ctrl = v4l2loopback_focus_s_ctrl,
++};
+ static const struct v4l2_ctrl_ops v4l2loopback_ctrl_ops = {
+ 	.s_ctrl = v4l2loopback_s_ctrl,
+ };
+@@ -2376,6 +2385,8 @@
+ 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_sustainframerate, NULL);
+ 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_timeout, NULL);
+ 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_timeoutimageio, NULL);
++	v4l2_ctrl_new_std(hdl, &v4l2loopback_focus_ops, V4L2_CID_FOCUS_AUTO, 0, 1, 1, 1);
++	v4l2_ctrl_new_std(hdl, &v4l2loopback_focus_ops, V4L2_CID_FOCUS_ABSOLUTE, 0, 1200, 1, 0);
+ 	if (hdl->error) {
+ 		ret = hdl->error;
+ 		goto error;
