@@ -47,7 +47,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] C5 Lens calibration per module: focus code to distance, infinity position, temperature drift
 - [ ] C6 Autofocus extras: focus lock, tap-to-focus (AE/AF window controls exist), AF assist in the dark
 ### C-2 System side
-- [ ] C7 Run as a normal user (udev rules / permissions) instead of `sudo`
+- [x] C7 Run as a normal user instead of `sudo` — udev rules (`tools/99-a7z-camera.rules`) and a group-writable control file: reading `/dev/video9`, `a7zfocus` and a hand-run `a7zcap` (90 frames) all verified as `radxa` with no sudo. The systemd service stays root (module loading, `sunxi_ve` reload). See BOOT.md
 - [ ] C8 Thermal and power behaviour in a closed case at full load; clock pinning versus power draw
 - [ ] C9 Accurate timestamps / shared clock for the balloon and observatory logs
 - [ ] C10 Dual-camera sync

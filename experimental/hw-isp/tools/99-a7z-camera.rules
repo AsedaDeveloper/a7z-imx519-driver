@@ -1,0 +1,5 @@
+# Let the "video" group use the IMX519 hardware blocks without sudo (checklist C7).
+# Nodes: VIN/ISP capture (video*, media*, v4l-subdev*), Allwinner video engine, dma-buf heap.
+KERNEL=="cedar_dev|cedar_dev_ve2", GROUP="video", MODE="0660"
+KERNEL=="system", SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"
+KERNEL=="g2d", GROUP="video", MODE="0660"

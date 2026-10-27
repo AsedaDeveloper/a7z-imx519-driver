@@ -38,3 +38,18 @@ systemctl is-active a7z-camera   -> active
 cv2.VideoCapture(9)               -> 15/15 frames, (1080, 1920, 3)
 HEALTH                            -> 30.0 fps, 0 drops
 ```
+
+## Running without sudo (checklist C7)
+Everything you do day to day is sudo-free for a user in the `video` group (the default `radxa` user is):
+
+| What | Why it works |
+|---|---|
+| Read `/dev/video9` (`v4l2-ctl`, ffmpeg, GStreamer, OpenCV, `python/a7z_v4l2.py`) | the loopback node is group `video` |
+| `a7zfocus <dpt\|af\|auto>` | the service pre-creates `/run/a7zcam.ctl` as `root:video 0660` (`ExecStartPre=install -m 0660 -g video`) |
+| Run `a7zcap` / `a7zdual` / `enctest` by hand | `tools/99-a7z-camera.rules` puts `cedar_dev*`, `dma_heap/system` and `g2d` in group `video` (`media0` and `v4l-subdev*` already were) |
+
+```sh
+sudo install -m644 tools/99-a7z-camera.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+```
+Verified as `radxa` with the service stopped: `a7zcap.enc 1920 1080 90` wrote its frames. One message remains: libisp cannot save its context file to `/mnt` (root-only), which only
+means the context is not persisted between runs. The service itself stays root on purpose: it loads `v4l2loopback` and reloads `sunxi_ve` after an encoder wedge.

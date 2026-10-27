@@ -8,6 +8,7 @@ Environment=A7Z_NODE=/dev/video9
 Environment=A7Z_CTL=/run/a7zcam.ctl
 Environment=A7Z_LOG=/var/log/a7z-camera.log
 ExecStartPre=/sbin/modprobe v4l2loopback devices=1 video_nr=9 card_label=A7Z\x20IMX519 exclusive_caps=1 max_buffers=4
+ExecStartPre=/usr/bin/install -m 0660 -g video /dev/null /run/a7zcam.ctl
 ExecStart=/usr/local/bin/a7zstream.sh 1920 1080 30
 Restart=always
 RestartSec=5
