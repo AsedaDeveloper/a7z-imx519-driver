@@ -43,3 +43,6 @@ distinct lens positions covering 0 to 12 dpt, flags 0/1/2 all seen.
 * `gain` is the sensor gain only; the ISP's digital gain is not in it.
 * The 4-frame exposure latency was measured at 1080p30; it is a pipeline depth, so it is expected to hold at other rates but was not checked.
 * Frames the stale-frame filter drops (`A7Z_FRESH`) also get records; they are never matched because a published frame's own record is always nearer.
+
+## Does libisp's auto exposure cope with the latency? (B8)
+`tools/ae_check.py`: static scene, 85 s, exposure x gain never moved. Torch at the lens switched on then off (one trial each way): on, luma 130 -> 214 and back to 133 in ~1.5 s with no overshoot; off, luma fell to 38, AE raised exposure x gain 10x in 6 frames, overshot to luma 168 (+30%) and settled to 131 in ~0.3 s. So it does not hunt; the one transient overshoot on dimming is what a loop that only partly allows for the 4-frame delay would show, but one trial cannot separate that from deliberate fast-attack tuning.
