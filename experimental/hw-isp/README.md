@@ -1,3 +1,5 @@
+**[VERIFIED.md](VERIFIED.md) — what is verified and what is not, on one page.**
+
 # Experimental: Allwinner hardware ISP (ISP602) path for the IMX519
 
 > **Status: experimental, tested on one board / one sensor module / one lens.** Nothing here replaces the main (raw-path)

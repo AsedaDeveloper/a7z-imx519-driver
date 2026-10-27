@@ -53,7 +53,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] C10 Dual-camera sync
 - [x] C11 One diagnostics tool (drops, link errors, exposure, white balance, autofocus state) **Oct 27: `tools/a7zstatus` (human + `--json`, exit codes) reports service, drops, rate, autofocus, live frame stats and white-balance ratios, temperatures, libisp errors; exposure/gain/lens come from the B18 metadata ring and the MIPI link error bits from B6 (that line needs root); white balance comes from the live frame probe. Building it found and fixed a silent failure: a feeder with no loopback ran "healthy" and published nothing; a7zcap now exits 5 and the supervisor reloads the loopback. See STABILITY.md**
 ### C-3 Project side
-- [ ] C12 Documentation of what is verified, plus the soak-test script (see B7)
+- [x] C12 Documentation of what is verified — [VERIFIED.md](VERIFIED.md) is the one-page index: what can be relied on, what is measured with its limits stated, what is known not to work, and the one flaw to know about; each row links to the document holding the evidence. The soak script is `tools/soak.sh` (B7)
 - [ ] C13 Clean the driver for the Radxa / mainline kernel (upstreaming)
 - [ ] C14 Beta-tester feedback pass (Reddit post is live)
 
