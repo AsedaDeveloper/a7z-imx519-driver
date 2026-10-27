@@ -74,3 +74,12 @@ So the param file — stage flags and tables — is the only working way into th
    `[ISP_DEBUG]` output — but libisp never prints those stage names at runtime.
 
 What is left to try: reading the ISP hardware registers directly, or a rig with exposure pinned on a static chart so a curve can be plotted and inverted.
+
+## PLTM parameter sweep (Oct 27, A1)
+`tools/pltm_sweep.py`: the 16 distinct elements of `pltm_cfg` (the first of each group of identical values: 1, 2, 3, 10, 11, 14, 15, 16, 21, 25, 29, 33, 37, 41, 42, 43), each at x2 and x0.5 of the deployed value,
+a baseline every fourth element, 100 frames per trial, a fixed bright light in frame (about 1% of pixels clipped). The baselines alone ranged 0.78-1.13% clipped and detail drifted upward over the run, so
+differences under about 0.3 points are noise.
+
+One trial looked real: element 1 halved, 0.41% against 1.04%, with detail up. `tools/pltm_pair.py` repeated it (16, 8, 0, three rounds each, interleaved baselines): 0.81-1.09% against 0.76-0.94%.
+**It was noise.** Element 2 doubled was the one clear mover and it made things worse (2.13%). No element of `pltm_cfg` reduces clipping when scaled up or down by 2.
+Flag 24 (`defog_en`) is still the only lever that works. Its own strength parameters, if it has any, are not in `pltm_cfg`; they were not found.
