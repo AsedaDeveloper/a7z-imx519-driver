@@ -41,11 +41,34 @@ int main(void) {
     b.src_image_h.width = SW; b.src_image_h.height = SH; b.src_image_h.align[0] = 0;
     b.src_image_h.clip_rect = (g2d_rect){0, 0, SW, SH};
     b.src_image_h.mode = G2D_PIXEL_ALPHA; b.src_image_h.alpha = 255; b.src_image_h.color_range = COLOR_RANGE_0_255;
+    b.src_image_h.gamut = G2D_BT601; b.src_image_h.bpremul = 0;
+    b.src_image_h.bbuff = 1;                    /* 0 = layer is the constant `color`, not the buffer: the reason every earlier attempt wrote black/nothing */
+    if (getenv("FULL")) { b.src_image_h.resize = (g2d_size){SW, SH}; b.src_image_h.coor = (g2d_coor){0, 0}; }
     b.dst_image_h = b.src_image_h;
     b.dst_image_h.fd = dfd; b.dst_image_h.width = DW; b.dst_image_h.height = DH;
     b.dst_image_h.clip_rect = (g2d_rect){0, 0, DW, DH};
 
+    if (getenv("FULL")) b.dst_image_h.resize = (g2d_size){DW, DH};
+    if (getenv("VER")) { struct g2d_hardware_version v = {0}; int r = ioctl(g, G2D_CMD_QUERY_VERSION, &v); printf("QUERY_VERSION rc=%d g2d=0x%x chip=0x%x\n", r, v.g2d_version, v.chip_version); }
     double t0 = now(); int rc = 0, N = 100;
+    const char *mode = getenv("MODE") ? getenv("MODE") : "blt";
+    if (!strcmp(mode, "task")) {
+        mixer_para mp; memset(&mp, 0, sizeof mp);
+        mp.op_flag = OP_BITBLT; mp.flag_h = G2D_BLT_NONE_H; mp.src_image_h = b.src_image_h; mp.dst_image_h = b.dst_image_h;
+        int id = ioctl(g, G2D_CMD_CREATE_TASK, &mp); printf("CREATE_TASK -> %d\n", id);
+        if (id < 0) perror("CREATE_TASK");
+        unsigned int uid = id;
+        for (int i = 0; i < N && !rc; i++) rc = ioctl(g, G2D_CMD_TASK_APPLY, &uid);
+        printf("TASK_APPLY rc=%d\n", rc);
+        ioctl(g, G2D_CMD_TASK_DESTROY, &uid);
+    } else if (!strcmp(mode, "mixer")) {
+        mixer_para mp; memset(&mp, 0, sizeof mp);
+        mp.op_flag = OP_BITBLT; mp.flag_h = G2D_BLT_NONE_H; mp.src_image_h = b.src_image_h; mp.dst_image_h = b.dst_image_h;
+        unsigned long args[2] = {(unsigned long)&mp, 1};
+        for (int i = 0; i < N && !rc; i++) rc = ioctl(g, G2D_CMD_MIXER_TASK, &mp);
+        printf("MIXER_TASK(&mixer_para) rc=%d\n", rc);
+        (void)args;
+    } else
     for (int i = 0; i < N && !rc; i++) rc = ioctl(g, G2D_CMD_BITBLT_H, &b);
     double dt = (now() - t0) / N;
     printf("ioctl rc=%d  %.2f ms/frame\n", rc, dt * 1e3);
