@@ -80,9 +80,10 @@ static void stream_frame(void *const planes[3]);
 static void ctl_poll(void);
 static int g_lb_fd = -1; static int g_lb_h = 0;
 static void lb_frame(void *const planes[3], int gw);   // A7Z_LOOPBACK=/dev/videoN: publish ISP frames to a v4l2loopback node so ordinary V4L2 apps can read them
-static unsigned g_seq_last; static long g_seq_drop; static long g_frames_out;   // drop accounting must span BOTH loops: autofocus dequeues frames too, and counting
+static unsigned g_seq_last; static long g_seq_drop; static long g_frames_out, g_frames_in;   // drop accounting must span BOTH loops: autofocus dequeues frames too, and counting
 static void seq_track(unsigned seq)                                             // only the main loop's buffers made an autofocus sweep look like 45 dropped frames
 {
+	g_frames_in++;                                                                // every dequeued frame, main loop and autofocus alike
 	if (g_seq_last && seq > g_seq_last + 1) g_seq_drop += seq - g_seq_last - 1;
 	g_seq_last = seq;
 }
@@ -649,10 +650,15 @@ int main(int argc, char **argv)
 	FILE *outf = stdout;
 	if (getenv("A7Z_STDOUT")) { outf = fdopen(dup(1), "wb"); dup2(2, 1); }   // libisp printf()s to stdout: keep frames on a private fd
 	const char *prefix = argv[4];
-	int fd = open("/dev/video0", O_RDWR);
-	if (fd < 0) { perror("open /dev/video0"); return 1; }
+	// A7Z_MERGE=1: the A733 "2-in-1" mode for widths above 3264 (full 4656x3496). Open ONLY /dev/video1; the driver forwards S_INPUT/S_FMT/S_PARM to video0 and streams
+	// both ISP pipelines. Needs A7Z_FPS=<the sensor mode's fixed fps> (e.g. 15 or 9), large_image=3 and ispSetIspLargeImage() on both ISP instances (below).
+	int merge_mode = getenv("A7Z_MERGE") ? atoi(getenv("A7Z_MERGE")) : 0;
+	const char *vdev = merge_mode ? "/dev/video1" : "/dev/video0";
+	int merge_checked = 0;
+	int fd = open(vdev, O_RDWR);
+	if (fd < 0) { perror(vdev); return 1; }
 
-	unsigned char merge = 0;
+	unsigned char merge = merge_mode ? 1 : 0;
 	xioctl(fd, VIDIOC_SET_DMA_MERGE, &merge, "SET_DMA_MERGE");
 	int input = 0;
 	if (xioctl(fd, VIDIOC_S_INPUT, &input, "S_INPUT")) return 1;
@@ -661,12 +667,13 @@ int main(int argc, char **argv)
 	memset(&parm, 0, sizeof parm);
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	parm.parm.capture.capturemode = V4L2_MODE_VIDEO;
-	parm.parm.capture.reserved[2] = getenv("A7Z_LARGE") ? atoi(getenv("A7Z_LARGE")) : 0;   // 3 = 2-in-1 dual-ISP mode for widths above 3264
+	int large = getenv("A7Z_LARGE") ? atoi(getenv("A7Z_LARGE")) : (merge_mode ? 3 : 0);
+	parm.parm.capture.reserved[2] = large;   // 3 = 2-in-1 dual-ISP mode for widths above 3264
 	parm.parm.capture.timeperframe.numerator = 1;
 	parm.parm.capture.timeperframe.denominator = getenv("A7Z_FPS") ? atoi(getenv("A7Z_FPS")) : 30;   // picks the sensor mode: the driver only considers modes whose fps_fixed matches
 	if (xioctl(fd, VIDIOC_S_PARM, &parm, "S_PARM")) return 1;
 
-	struct sensor_isp_cfg icfg = { .isp_wdr_mode = 0, .large_image = getenv("A7Z_LARGE") ? atoi(getenv("A7Z_LARGE")) : 0 };
+	struct sensor_isp_cfg icfg = { .isp_wdr_mode = 0, .large_image = large };
 	xioctl(fd, VIDIOC_SET_SENSOR_ISP_CFG, &icfg, "SET_SENSOR_ISP_CFG");
 
 	struct v4l2_format fmt;
@@ -711,9 +718,14 @@ int main(int argc, char **argv)
 	AWIspApi *api = CreateAWIspApi();
 	int isp_id = api ? api->ispGetIspId(0) : -1;
 	fprintf(stderr, "[a7zcap] isp_id=%d\n", isp_id);
-	if (api && isp_id >= 0) {
-		int r = api->ispStart(isp_id);
-		fprintf(stderr, "[a7zcap] ispStart=%d\n", r);
+	int nisp = merge_mode ? 2 : 1;                    // 2-in-1 mode runs both ISP instances, and both must know it is a large image or the pipeline stalls after 1-2 frames
+	for (int s = 0; s < nisp; s++) {
+		int id = api ? api->ispGetIspId(s) : -1;
+		if (api && id >= 0 && merge_mode) fprintf(stderr, "[a7zcap] ispSetIspLargeImage(%d)=%d\n", id, api->ispSetIspLargeImage(id));
+		if (api && id >= 0) {
+			int r = api->ispStart(id);
+			fprintf(stderr, "[a7zcap] ispStart(%d)=%d\n", id, r);
+		}
 	}
 
 	if (getenv("A7Z_DUMP_PARAM")) dump_live_param();
@@ -834,16 +846,22 @@ int main(int argc, char **argv)
 			}
 		}
 		seq_track(b.sequence);
+		if (merge_mode && ++merge_checked <= 3) {   // 2-in-1 start-up check: some starts come up with the LEFT ISP half empty for the whole run (and AE then blows out the right half)
+			const unsigned char *yp = mp[b.index][0]; long ls = 0, rs = 0, n = 0;
+			for (int r = gh / 16; r < gh - gh / 16; r += gh / 48) for (int c = 0; c < gw / 2; c += 8, n++) { ls += yp[(size_t)r * gw + c]; rs += yp[(size_t)r * gw + gw / 2 + c]; }
+			if (n && rs / n > 20 && ls / n < 3) { fprintf(stderr, "[a7zcap] 2-in-1 start failed: left half empty (luma L %ld, R %ld); restart the capture\n", ls / n, rs / n); return 6; }
+		}
 		ctl_poll();
 		hae_step(mp[b.index][0], gw, gh);
 		if (getenv("A7Z_HEALTH")) {              // one line a second: frames, driver sequence gaps (dropped frames) and measured rate
 			static struct timespec hp; static long hf0;
 			struct timespec hnow; clock_gettime(CLOCK_MONOTONIC, &hnow);
-			if (!hp.tv_sec) { hp = hnow; hf0 = g_frames_out; }
+			long hfo = g_lb_fd >= 0 ? g_frames_out : g_frames_in;     // frames published to the loopback, or just frames received when there is none
+			if (!hp.tv_sec) { hp = hnow; hf0 = hfo; }
 			double hel = (hnow.tv_sec - hp.tv_sec) + (hnow.tv_nsec - hp.tv_nsec) * 1e-9;
 			if (hel >= 1.0) {
-				fprintf(stderr, "[a7zcap] HEALTH frames=%ld fps=%.1f seqdrops=%ld stale=%ld\n", g_frames_out, (g_frames_out - hf0) / hel, g_seq_drop, g_stale);
-				fflush(stderr); hp = hnow; hf0 = g_frames_out;
+				fprintf(stderr, "[a7zcap] HEALTH frames=%ld fps=%.1f seqdrops=%ld stale=%ld\n", hfo, (hfo - hf0) / hel, g_seq_drop, g_stale);
+				fflush(stderr); hp = hnow; hf0 = hfo;
 			}
 		}
 		int every = getenv("A7Z_EVERY") ? atoi(getenv("A7Z_EVERY")) : 10;
@@ -905,7 +923,7 @@ int main(int argc, char **argv)
 	}
 
 	xioctl(fd, VIDIOC_STREAMOFF, &t, "STREAMOFF");
-	if (api && isp_id >= 0) { api->ispStop(isp_id); }
+	if (api) for (int s = 0; s < nisp; s++) { int id = api->ispGetIspId(s); if (id >= 0) api->ispStop(id); }
 	if (api) DestroyAWIspApi(api);
 	close(fd);
 	if (g_fresh) fprintf(stderr, "[a7zcap] dropped %ld stale frames to keep the preview current\n", g_stale);

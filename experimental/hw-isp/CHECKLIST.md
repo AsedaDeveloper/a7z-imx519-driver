@@ -8,7 +8,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] A1 Highlight protection without the sharpness loss. **Oct 26: partial — ISP stage flag 24 (`tuning_v7`) cuts clipped pixels by ~32% (3 paired runs) with no cost to noise, colour or detail, unlike `A7Z_HAE`. Not enough on its own; PLTM/DRC curves still untouched.** See HIGHLIGHTS.md
 - [ ] A2 Check white balance (tuning_v6) under daylight and lamps, not only the iPad chart **Oct 27: daylight passes (paper towel, lit area: R/G 0.986, B/G 0.985 vs targets 0.98-1.00 / 1.00-1.04; B/G ~1.5% low, within the 0.979-0.992 spread across regions). Warm and cool cases still open: no lamps available, plan is iPad as light source (screen-simulated) then real low-sun / open-shade daylight.**
 - [x] A3 Autofocus with a moving subject: settle-wait, 0.90 / 0.80 triggers, futile-refocus guard (done Oct 24, verified live)
-- [ ] A4 Bring the newer autofocus watcher, exposure cap and fixes into the full-resolution tool (`a7zdual`)
+- [x] A4 Newer autofocus watcher, exposure cap and fixes at full resolution — done by teaching `a7zcap` the 2-in-1 mode (`A7Z_MERGE=1`) instead of porting into `a7zdual`: **4656x3496 at 15.1 fps, 1491 frames, 0 dropped; lens knocked 1.5 dpt out of focus recovered 7/7 in 1.83-1.96 s; 2 ms exposure cap clamps to 2000-2008 us**. Flaw found: about one start in three has the left ISP half empty; detected at start-up, exit code 6 (retry). See README.md
 - [ ] A5 Cool light above ~8000 K still reads blue (find the AWB limit that stops libisp choosing the coolest lights)
 - [x] A6 Higher-resolution / higher-fps preview — full 1080p30 over USB via hardware H.264 (~0.75 MB/s at 6 Mbit/s); viewer `lv_enc.sh`
 

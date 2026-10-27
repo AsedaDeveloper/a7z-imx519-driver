@@ -31,7 +31,8 @@ driver's overlay.
 
 ## What does not work (yet)
 
-* `a7zdual` (the only tool that can go above 3264 wide) is a separate program from `a7zcap`. It has autofocus only in live-preview mode (`A7Z_AF=1` with `A7Z_STREAM`), no `A7Z_FLAT`, and no `A7Z_SWEEP`/`A7Z_FOCUS`. Folding the two together is not done.
+* **Full resolution through `a7zcap` (`A7Z_MERGE=1`).** `a7zcap` now speaks the 2-in-1 mode too, so the whole current feature set (sweep autofocus with the settle-wait watcher, `A7Z_MAXEXP` cap, drop accounting, `A7Z_HEALTH`, `A7Z_FRESH`) works at 4656x3496: `A7Z_MERGE=1 A7Z_FPS=15 A7Z_AF=1 A7Z_MAXEXP=30000 A7Z_HEALTH=1 a7zcap 4656 3496 N PREFIX` (`A7Z_NBUF=4`). Verified: **15.1 fps for 1491 frames, 0 dropped**, a lens knocked 1.5 dioptre out of focus is detected and recovered in 1.83-1.96 s (7 of 7), and the exposure cap clamps (2 ms cap gives 2000-2008 us). **Known flaw:** roughly one start in three comes up with the *left ISP half empty for the whole run* (AE then blows out the right half); `a7zcap` checks the first frames and exits with code **6** so the caller can simply start again. No hardware encoder at this size (nothing above 1080p encodes), so no loopback/H.264 here.
+* `a7zdual` is kept for its decimated live preview (`A7Z_STREAM`); it still has the older autofocus watcher, no exposure cap and no drop accounting.
 * No seam handling has been needed so far, but only a handful of scenes were checked; look for a join at the middle column on yours.
 * **Software flat-field (`A7Z_FLAT`) is off and ships no map.** Applying a gain map to the final 8-bit image clips highlights (27%
   of a bright test frame). A correct fix belongs in the ISP's own lens-shading stage on raw data.
