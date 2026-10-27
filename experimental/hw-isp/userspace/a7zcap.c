@@ -741,6 +741,15 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_ENC") && getenv("A7Z_STDOUT") && enc_open(gw, (int)(ml[0][0] / gw)) != 0) return 1;
 	if (getenv("A7Z_LOOPBACK")) g_lb_fd = lb_open(getenv("A7Z_LOOPBACK"), gw, H);
 	if (getenv("A7Z_CTL")) { g_ctl_path = getenv("A7Z_CTL"); fprintf(stderr, "[a7zcap] control file: %s\n", g_ctl_path); }
+	if (getenv("A7Z_ISPLOG")) {                 // libisp keeps its verbosity in three exported ints; raising them makes it name each ISP stage it enables
+		int lv = atoi(getenv("A7Z_ISPLOG"));
+		const char *syms[] = { "isp_cfg_log_param", "isp_dev_log_param", "isp_lib_log_param" };
+		for (unsigned i = 0; i < sizeof syms / sizeof *syms; i++) {
+			int *p = (int *)dlsym(RTLD_DEFAULT, syms[i]);
+			if (p) { fprintf(stderr, "[a7zcap] %s %d -> %d\n", syms[i], *p, lv); *p = lv; }
+			else fprintf(stderr, "[a7zcap] %s not found\n", syms[i]);
+		}
+	}
 	if (g_hae) for (int k = 0; k < 200 && g_hae_stable < 8; k++) grab_sharp(1, 0);   // let the exposure converge before the first sweep
 	if (getenv("A7Z_3ADUMP") && api && isp_id >= 0) {        // snapshot libisp's live 3A/ISP state: diffing it between two tunings shows which block a flag actually drives
 		int i3a = 0, dbg = 0;

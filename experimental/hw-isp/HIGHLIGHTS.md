@@ -51,3 +51,26 @@ A third fewer clipped pixels is not real highlight protection — a bright windo
   needs a different approach: reading the ISP hardware registers directly, or a static scene with exposure pinned so the curve itself can be plotted.
 * the PLTM / DRC curve parameters themselves. Only the enable flag was touched; the curves are untouched defaults.
 * a scene with a genuinely blown window, rather than a lamp, to test against.
+
+## The V4L2 user controls on /dev/video0 are decorative (Oct 27)
+The vendor driver advertises `brightness`, `contrast`, `saturation`, `hue`, `sharpness`, `white_balance_temperature` and more. **None of the ones tested do
+anything.** Each was stepped across its range while a 900-frame capture ran with focus and exposure pinned:
+
+| control | range stepped | measured | result |
+|---|---|---|---|
+| `sharpness` | 0, 250, 500, 1000 | detail (Laplacian var) 2.4-2.6 | no effect (1.07x, within noise) |
+| `saturation` | -256, 0, 512 | mean chroma 20.8-21.3 | no effect (1.02x) |
+| `contrast` | -128, 0, 128 | luma SD 49.8-51.4 | no effect (1.03x) |
+| `brightness` | 0, -80 | mean luma, clipping | no effect (measured earlier, during A1) |
+| `focus_absolute` | 0..127 | detail flat at 2.4-2.5 | no effect (reaches libisp, lens never moves) |
+
+So the param file — stage flags and tables — is the only working way into the ISP. Treat the V4L2 control list on this driver as advertising, not API.
+
+## Four ways of identifying a stage flag that did not work
+1. `__isp_ctx_apply_enable` maps flag bytes to module-enable bits, but three bytes, including flag 24's, are absent from that table.
+2. Diffing `ispGet3AParameters` (73416 bytes) between tunings: a same-tuning control pair differs in *more* bytes (2531) than the two tunings do (1469).
+3. There is no pointer table ordering the `set_pltm_en` / `set_sharp_en` / ... strings in .rodata, so their order carries no bit mapping.
+4. Raising libisp's verbosity works — `isp_cfg_log_param`, `isp_dev_log_param` and `isp_lib_log_param` are exported ints, and `A7Z_ISPLOG=-1` in a7zcap turns on
+   `[ISP_DEBUG]` output — but libisp never prints those stage names at runtime.
+
+What is left to try: reading the ISP hardware registers directly, or a rig with exposure pinned on a static chart so a curve can be plotted and inverted.
