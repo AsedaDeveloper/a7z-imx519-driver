@@ -41,7 +41,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 ## C. Second list (smaller items and extras)
 ### C-1 Image quality and features
 - [ ] C1 Raw Bayer capture bypassing the ISP (DNG-style files) for tuning, astro and own processing
-- [ ] C2 Flicker (50/60 Hz banding) handling under artificial light
+- [ ] C2 Flicker (50/60 Hz banding) handling under artificial light. **Oct 27: attempted and inconclusive — row-brightness banding was identical at 2/4/6/8/10/20 ms exposure (SD 0.676-0.682), but the "period 96 rows" the metric reported is ringing from its own 81-row detrend filter, not the light. Real 50 Hz banding would change sharply with exposure and vanish at 10 and 20 ms, so this scene (daylight plus a possibly DC-driven LED) has no flicker to measure. Needs a known-flickering mains lamp in a darkened room and a metric that does not pre-filter the rows.**
 - [ ] C3 HDR / multi-exposure merge for highlights
 - [ ] C4 Hot / defective pixel mapping (matters in long dark exposures)
 - [ ] C5 Lens calibration per module: focus code to distance, infinity position, temperature drift
