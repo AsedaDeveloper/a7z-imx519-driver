@@ -34,7 +34,7 @@ Items marked (verify) depend on a hardware block that must first be confirmed on
 - [ ] B14 Per-module calibration: lens shading, black level, noise profile per ISO, colour matrix per illuminant, gamma / tone curve (white balance done: v6; matrix near identity, not deployed)
 - [ ] B15 Proper chart (ColorChecker) and real lamps instead of the iPad
 ### B-5 Sensor modes and features
-- [ ] B16 More sensor modes (binned, higher fps) and a clean mode switch without reload
+- [x] B16 Sensor modes and a clean mode switch — all **seven declared modes verified through the hardware ISP at their rated rate** (720p 84.7, 1080p 60.0, 2328x1748 30.0, 3264x2448 13.4, 3840x2160 18.0, full 9.4 and 15.1), and **switching modes needs no driver reload** (5/5 transitions, including in and out of 16 MP). No new mode was added: the set already covers binned and high-fps. Found the trap that made the fast modes look broken — libisp's ~30 ms auto exposure pins anything above ~33 fps, so 720p85/1080p60 need `A7Z_MAXEXP`. Also: the service's 1080p30 request actually runs the 2328x1748 binned mode through the scaler. `tools/mode_matrix.py`; see MODES.md
 - [ ] B17 Check whether the IMX519 phase-detect data is usable for much faster autofocus
 - [x] B18 Per-frame metadata — one record per frame (exposure, gain, lens position, colour gains, autofocus flags) in a shared ring `/run/a7zcam.meta` and an optional JSON-lines log, matched to a `/dev/video9` frame by its timestamp: **90/90 frames matched as an ordinary user; recorded exposure correlates 1.000 with frame brightness at offset 0 (-0.76..+0.08 elsewhere)**. Measured the exposure pipeline latency at the same time: **4 frames** at 1080p30. `Camera.read_with_meta()` in `python/a7z_v4l2.py`. See METADATA.md
 

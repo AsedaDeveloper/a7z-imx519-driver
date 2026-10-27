@@ -63,6 +63,12 @@ one per ISP, and both DMAs write into one buffer. **No kernel change is needed**
 A7Z_MERGE=1 A7Z_FPS=15 ./a7zdual 4656 3496 20 /tmp/cap/full    # full 16 MP, 15 fps (A7Z_FPS=9: 9.4 fps, stock clocks)
 ```
 
+### Sensor modes
+
+All seven declared modes run through the hardware ISP at their rated rate, and switching between them needs no driver reload. The catch is exposure, not the mode:
+libisp asks for ~30 ms in ordinary indoor light, which pins anything above ~33 fps, so 1280x720@85 and 1920x1080@60 need `A7Z_MAXEXP=8000` to reach 84.7 and 60.0 fps.
+See [MODES.md](MODES.md) and `tools/mode_matrix.py`.
+
 ### Going faster than 9.4 fps at 16 MP
 
 The stock full-res mode runs the sensor at 816 Mbit/s per lane (9.44 fps). `A7Z_FPS=15` selects a second full-res mode whose clocks
