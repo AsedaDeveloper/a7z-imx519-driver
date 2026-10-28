@@ -35,3 +35,8 @@ Output is **0.0 with zero temporal noise at every gain tested: 16x to 24x in 1x 
   disproves it. The 24x/32x noise jump in the lit table above is therefore ordinary amplified scene noise, not a black-level fault.
 * Because the output clamps to 0, the ISP's black level sits at or above the sensor's dark level at every gain. That makes dark noise unmeasurable from the output (it is hidden below the clamp, not zero), and the
   real sensor black level is not recoverable here. A raw-Bayer dump would be needed for it.
+
+## Hot pixels (checklist C4)
+`tools/hotpix_map.py`, lens sealed (mean 0.000), 32x gain, mean of 60 frames at 30 ms and 30 frames at 200 ms (5 fps): **no pixel above 1.0 of 255 on the 1920x1080 output**; the 200 ms run had 5 pixels above 0.5,
+the brightest at (1837, 918) with a mean of 1.0. The ISP corrects defective pixels itself (otf_dpc on) and clamps its black level, so this says "no hot pixel survives to the output at these settings", not that the sensor has none.
+A map of the sensor's own bad pixels needs raw frames (C1).
