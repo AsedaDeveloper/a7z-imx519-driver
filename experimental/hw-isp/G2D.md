@@ -18,5 +18,20 @@ A solid `G2D_CMD_FILLRECT_H` always worked, which is what showed the hardware, I
 | NV12 scaled to 640x360 and rotated in one call | partial garbage (172980 of 230400 pixels written); do rotation as a separate step |
 | `G2D_CMD_CREATE_TASK` / `TASK_APPLY` / `MIXER_TASK` | not working with the guessed argument shapes ("Null pointer" / "Fail to find mixer task" in dmesg); the legacy `BITBLT_H` path is enough |
 
+## In use: the preview downscale (`A7Z_G2D=1`, Oct 28)
+`a7zcap` can now do the `A7Z_STREAM_D=n` preview downscale on the G2D. The three planes of each ISP buffer are exported with `VIDIOC_EXPBUF` (the vin driver supports it) and each is scaled as an 8-bit plane
+(`G2D_FORMAT_Y8`, 1920x1080 -> 640x360 for Y, 960x540 -> 320x180 for U and V) into dma-heap buffers that go straight to the output, so the CPU never reads the uncached capture memory.
+Off by default, and not used with `A7Z_SWAWB` (that edits the planes on the CPU). Falls back to the CPU box filter if `/dev/g2d` or the export is unavailable.
+
+Measured on the board at 1080p30, `A7Z_STREAM_D=3`, 600-700 frames (`A7Z_G2D_STAT=1` times both paths on the same buffers, every 50th frame for the CPU one):
+| | CPU per frame | wall per frame |
+|---|---|---|
+| G2D, three planes | **2.0 ms** | 13.1 ms (the ioctl blocks until the engine is done) |
+| CPU box filter | **12.8 ms** | about the same |
+
+So the saving is about **10.8 ms of CPU per frame**, four times the 2-3 ms estimated before it was built (that figure only counted the scaling, not the copy out of uncached memory). Wall time does not improve.
+Y plane against the CPU box filter: mean absolute difference 0.65 of 255, maximum 41 (at sharp edges; the engine's filter is not a box average). A frame from the G2D output has the right colours and geometry.
+Frame pacing: **700 frames at 30 fps with 0 sequence drops** (one run). The same run with the `A7Z_G2D_STAT` sampler on stalled four times (one for about a second, 68 drops) because the sampler itself reads uncached memory on the CPU; do not use the stats flag in service.
+
 ## Not done
-Nothing in the pipeline uses it yet. The only CPU box downscale is the optional USB preview (`A7Z_STREAM_D`); using the G2D there means handing it the ISP output buffers as dma-buf fds, for a saving of ~2-3 ms CPU per frame.
+Rotation and colour conversion on the G2D are measured above but nothing uses them. The service does not enable `A7Z_G2D` (the 1080p30 loopback path never downscales).

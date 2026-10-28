@@ -20,6 +20,10 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <stdbool.h>
+#include <linux/dma-heap.h>
+#include <linux/dma-buf.h>
+#include <bsp/linux/sunxi-g2d.h>
 #include <linux/videodev2.h>
 #include "sunxi_camera_v2.h"
 #include "AWIspApi.h"
@@ -539,7 +543,7 @@ static void swawb(unsigned char *Y, unsigned char *U, unsigned char *V, int ow, 
 		U[j * cw + i] = (unsigned char)(nu < 0 ? 0 : nu > 255 ? 255 : nu + .5f); V[j * cw + i] = (unsigned char)(nv < 0 ? 0 : nv > 255 ? 255 : nv + .5f);
 	}
 }
-static void emit_scaled(FILE *f, void *const planes[3], int gw, int gh, int D)
+static void cpu_scale(void *const planes[3], int gw, int gh, int D)
 {
 	int cw = gw / 2, ch = gh / 2, ow = (gw / D) & ~1, oh = (gh / D) & ~1, ocw = ow / 2, och = oh / 2;
 	if (!g_sy) { g_sy = malloc((size_t)gw * gh); g_su = malloc((size_t)cw * ch); g_sv = malloc((size_t)cw * ch); g_oy = malloc((size_t)ow * oh); g_ou = malloc((size_t)ocw * och); g_ov = malloc((size_t)ocw * och); }
@@ -554,6 +558,58 @@ static void emit_scaled(FILE *f, void *const planes[3], int gw, int gh, int D)
 		int au = 0, av = 0; for (int dy = 0; dy < D; dy++) { size_t o = (size_t)(j * D + dy) * cw + i * D; for (int dx = 0; dx < D; dx++) { au += g_su[o + dx]; av += g_sv[o + dx]; } }
 		g_ou[j * ocw + i] = (unsigned char)(au / n2); g_ov[j * ocw + i] = (unsigned char)(av / n2);
 	}
+}
+// ---- the same downscale on the 2D engine (A7Z_G2D=1, checklist B11). The three planes of an ISP buffer are exported as dma-bufs (VIDIOC_EXPBUF) and each is scaled as an 8-bit
+//      plane by /dev/g2d into a dma-heap buffer, so the CPU never reads the uncached capture memory. Needs A7Z_STREAM_D; not used with A7Z_SWAWB (that edits the planes on the CPU).
+static int g_g2d = -1, g_pfd[NBUF][3] , g_g2d_ready, g_g2d_off; static unsigned char *g_gd[3]; static int g_gdfd[3]; static size_t g_gdlen[3];
+static int heap_buf(size_t len) { int h = open("/dev/dma_heap/system", O_RDWR); struct dma_heap_allocation_data a = { .len = len, .fd_flags = O_RDWR | O_CLOEXEC }; if (h < 0 || ioctl(h, DMA_HEAP_IOCTL_ALLOC, &a) < 0) { if (h >= 0) close(h); return -1; } close(h); return a.fd; }
+static int g2d_plane(int sfd, int sw, int sh, int dfd, int dw, int dh)
+{
+	g2d_blt_h b; memset(&b, 0, sizeof b); b.flag_h = G2D_BLT_NONE_H;
+	g2d_image_enh *S = &b.src_image_h; S->format = G2D_FORMAT_Y8; S->fd = sfd; S->width = sw; S->height = sh; S->clip_rect = (g2d_rect){ 0, 0, sw, sh };
+	S->mode = G2D_PIXEL_ALPHA; S->alpha = 255; S->color_range = COLOR_RANGE_0_255; S->gamut = G2D_BT601; S->bbuff = 1;          // bbuff 1: the layer is the buffer, not a constant colour
+	b.dst_image_h = *S; b.dst_image_h.fd = dfd; b.dst_image_h.width = dw; b.dst_image_h.height = dh; b.dst_image_h.clip_rect = (g2d_rect){ 0, 0, dw, dh };
+	return ioctl(g_g2d, G2D_CMD_BITBLT_H, &b);
+}
+static int g2d_scale(int idx, int gw, int gh, int D)           // result in g_gd[0..2] (Y, U, V), sizes ow x oh and ocw x och
+{
+	int cw = gw / 2, ch = gh / 2, ow = (gw / D) & ~1, oh = (gh / D) & ~1, ocw = ow / 2, och = oh / 2;
+	if (!g_g2d_ready) {
+		g_g2d_ready = 1; g_g2d = open("/dev/g2d", O_RDWR);
+		size_t len[3] = { (size_t)ow * oh, (size_t)ocw * och, (size_t)ocw * och };
+		for (int k = 0; k < 3; k++) { g_gdlen[k] = len[k]; g_gdfd[k] = heap_buf(len[k]); if (g_gdfd[k] >= 0) g_gd[k] = mmap(0, len[k], PROT_READ | PROT_WRITE, MAP_SHARED, g_gdfd[k], 0); if (g_gdfd[k] < 0 || g_gd[k] == MAP_FAILED) g_g2d_off = 1; }
+		for (int i = 0; i < NBUF && !g_g2d_off; i++) for (int k = 0; k < 3; k++) { struct v4l2_exportbuffer e; memset(&e, 0, sizeof e); e.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; e.index = i; e.plane = k; e.flags = O_RDWR; if (ioctl(g_fd, VIDIOC_EXPBUF, &e) < 0) { g_g2d_off = 1; break; } g_pfd[i][k] = e.fd; }
+		if (g_g2d < 0) g_g2d_off = 1;
+		fprintf(stderr, "[a7zcap] G2D preview scale %s\n", g_g2d_off ? "unavailable, using the CPU" : "ready");
+	}
+	if (g_g2d_off) return -1;
+	int sw[3] = { gw, cw, cw }, sh[3] = { gh, ch, ch }, dw[3] = { ow, ocw, ocw }, dh[3] = { oh, och, och };
+	for (int k = 0; k < 3; k++) {
+		struct dma_buf_sync s = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE }; (void)s;
+		if (g2d_plane(g_pfd[idx][k], sw[k], sh[k], g_gdfd[k], dw[k], dh[k]) < 0) return -1;
+		struct dma_buf_sync r = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ }; ioctl(g_gdfd[k], DMA_BUF_IOCTL_SYNC, &r);
+	}
+	return 0;
+}
+static double tnow(clockid_t c) { struct timespec t; clock_gettime(c, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
+static void emit_scaled(FILE *f, void *const planes[3], int gw, int gh, int D, int idx)
+{
+	int ow = (gw / D) & ~1, oh = (gh / D) & ~1, ocw = ow / 2, och = oh / 2;
+	if (getenv("A7Z_G2D") && !getenv("A7Z_SWAWB") && idx >= 0) {
+		static int n; static double cg, wg, cc; static long diff_n; static double diff_sum; static int diff_max;
+		double c0 = tnow(CLOCK_THREAD_CPUTIME_ID), w0 = tnow(CLOCK_MONOTONIC);
+		if (g2d_scale(idx, gw, gh, D) == 0) {
+			cg += tnow(CLOCK_THREAD_CPUTIME_ID) - c0; wg += tnow(CLOCK_MONOTONIC) - w0; n++;
+			if (getenv("A7Z_G2D_STAT") && n % 50 == 10) {         // every 50th frame also run the CPU path on the same buffer: its CPU cost, and how far the G2D result is from it
+				double c1 = tnow(CLOCK_THREAD_CPUTIME_ID); cpu_scale(planes, gw, gh, D); cc += tnow(CLOCK_THREAD_CPUTIME_ID) - c1;
+				for (int i = 0; i < ow * oh; i++) { int d = abs((int)g_oy[i] - (int)g_gd[0][i]); diff_sum += d; if (d > diff_max) diff_max = d; } diff_n += (long)ow * oh;
+			}
+			if (getenv("A7Z_G2D_STAT") && n % 200 == 0) fprintf(stderr, "[a7zcap] G2D scale: %.2f ms CPU, %.2f ms wall per frame over %d frames; CPU box path %.2f ms CPU (sampled); Y vs CPU box: mean abs diff %.2f, max %d\n", cg / n, wg / n, n, cc / (n / 50 > 0 ? n / 50 : 1), diff_n ? diff_sum / diff_n : 0.0, diff_max);
+			fwrite(g_gd[0], 1, g_gdlen[0], f); fwrite(g_gd[1], 1, g_gdlen[1], f); fwrite(g_gd[2], 1, g_gdlen[2], f);
+			return;
+		}
+	}
+	cpu_scale(planes, gw, gh, D);
 	if (getenv("A7Z_SWAWB")) swawb(g_oy, g_ou, g_ov, ow, oh);
 	fwrite(g_oy, 1, (size_t)ow * oh, f); fwrite(g_ou, 1, (size_t)ocw * och, f); fwrite(g_ov, 1, (size_t)ocw * och, f);
 }
@@ -1005,7 +1061,7 @@ int main(int argc, char **argv)
 			if (n % skip == 0) {
 				int sd = getenv("A7Z_STREAM_D") ? atoi(getenv("A7Z_STREAM_D")) : 1;
 				if (g_venc) stream_frame(mp[b.index]);
-				else if (sd > 1 && np >= 3) emit_scaled(outf, mp[b.index], gw, gh, sd);
+				else if (sd > 1 && np >= 3) emit_scaled(outf, mp[b.index], gw, gh, sd, b.index);
 				else emit_frame(outf, mp[b.index], pl, ml[b.index][0], np, gw, gh);
 				fflush(outf);
 			}
