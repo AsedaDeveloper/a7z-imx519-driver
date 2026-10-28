@@ -72,3 +72,9 @@ Measured Oct 28 on a real scene with depth: taps at (0.2,0.5) / (0.8,0.5) / (0.5
 and tapping the same spot twice gave 7.55 and 7.59 (0.04 dpt apart). So the spot decides where it focuses and it repeats. Not tested against known distances (that is C5).
 
 **AF assist in the dark: not possible.** The A7Z has no light source for the camera. The only help is what autofocus already does: a shorter exposure with more gain while it sweeps (`A7Z_AF_EXPDIV`, `A7Z_AF_GAINMAX`).
+
+## Anti-banding (checklist C2, written but not yet measured against a real flickering light)
+`band 50` (or `band 60`) in the control file, or `A7Z_BAND=50` in the environment, rounds every exposure that is at least one flicker period long down to a whole number of periods
+(10 ms steps at 50 Hz mains, 8.33 ms at 60) and raises the gain to keep the brightness, up to the gain cap. `band 0` turns it off. Mains lamps flicker at twice the line frequency, so
+an exposure of a whole number of periods sees each row the same amount of light. Below one period (a bright scene) it cannot help. Verified so far: the verb is accepted and the stream stays at 30 fps with no drops.
+The banding itself has not been measured: that needs a lamp driven from the mains in a dark room (`tools/flicker_check.py` is for that, not written yet).

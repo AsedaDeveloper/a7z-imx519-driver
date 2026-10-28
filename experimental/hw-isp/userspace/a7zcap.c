@@ -148,6 +148,7 @@ static int g_maxexp = 0, g_maxgain = 512;   // A7Z_MAXEXP (us) / A7Z_MAXGAIN: gl
 static int g_af_expdiv = 1, g_af_gainmax = 256;   // A7Z_AF_EXPDIV / A7Z_AF_GAINMAX: exposure cap during autofocus
 static int g_force_gain = 0, g_force_exp = 0;   // control file "gain N" / "exp N" (us): pin what is sent to the sensor, whatever libisp asks for ("free" lets it ask again)
 static struct sensor_exp_gain g_last_eg;
+static int g_band_hz = 0;   // A7Z_BAND=50|60 / control file "band 50|60|0": anti-banding, exposure is rounded down to a whole number of light-flicker periods (10 ms at 50 Hz mains) with gain making up the difference
 static __thread int g_my_lens_call = 0;
 int ioctl(int fd, unsigned long req, ...)
 {
@@ -173,6 +174,13 @@ int ioctl(int fd, unsigned long req, ...)
 		if (g_maxexp > 0 && eg->exp_val > g_maxexp && eg->gain_val > 0) {    // dim light: trade exposure for gain so frames keep coming at full rate
 			long long g = (long long)eg->gain_val * eg->exp_val / g_maxexp; if (g > g_maxgain) g = g_maxgain;
 			if (g > eg->gain_val) { eg->exp_val = (int)((long long)eg->exp_val * eg->gain_val / g); eg->gain_val = (int)g; }
+		}
+		if (g_band_hz > 0 && eg->gain_val > 0) {               // mains light flickers at twice the line frequency: an exposure of a whole number of those periods sees every row the same amount of light
+			int per = 500000 / g_band_hz;                       // 10000 us at 50 Hz, 8333 at 60
+			if (eg->exp_val >= per) {
+				int e = eg->exp_val / per * per; long long g = (long long)eg->gain_val * eg->exp_val / e; if (g > g_maxgain) g = g_maxgain;
+				eg->exp_val = e; if (g > eg->gain_val) eg->gain_val = (int)g;
+			}
 		}
 		if (g_expstep) {                                       // A7Z_EXPSTEP=1 (latency measurement): alternate full / half exposure on every libisp command and log the frame sequence at that moment
 			static int tog; tog ^= 1; if (tog) eg->exp_val = eg->exp_val / 2 > 40 ? eg->exp_val / 2 : 40;
@@ -702,6 +710,9 @@ static void ctl_poll(void)
 				if (!strcmp(verb, "gain")) g_force_gain = (int)arg; else if (!strcmp(verb, "exp")) g_force_exp = (int)arg; else g_force_gain = g_force_exp = 0;
 				if (g_fd >= 0 && g_last_eg.exp_val > 0) { struct sensor_exp_gain e = g_last_eg; ioctl(g_fd, VIDIOC_VIN_SENSOR_EXP_GAIN, &e); }   // our own ioctl() above applies the pinned values
 				fprintf(stderr, "[a7zcap] CTL %s: gain %d exp %d us (0 = libisp's choice)\n", verb, g_force_gain, g_force_exp);
+			} else if (!strcmp(verb, "band")) {
+				g_band_hz = (int)arg; if (g_band_hz != 50 && g_band_hz != 60) g_band_hz = 0;
+				fprintf(stderr, "[a7zcap] CTL anti-banding %d Hz%s\n", g_band_hz, g_band_hz ? "" : " (off)");
 			} else if (!strcmp(verb, "lock")) {
 				g_af_paused = 1; fprintf(stderr, "[a7zcap] CTL focus locked at %.2f dpt\n", g_af_dpt);
 			} else if (!strcmp(verb, "tap")) {       // tap X Y (fractions 0..1 of the frame): focus on that spot and hold; `tap` alone returns to the centre
@@ -860,6 +871,7 @@ int main(int argc, char **argv)
 	if (getenv("A7Z_HAE_TARGET")) g_hae_target = atof(getenv("A7Z_HAE_TARGET"));
 	if (getenv("A7Z_HAE_CLIP")) g_hae_clip = atof(getenv("A7Z_HAE_CLIP"));
 	if (getenv("A7Z_MAXEXP")) g_maxexp = atoi(getenv("A7Z_MAXEXP"));
+	if (getenv("A7Z_BAND")) g_band_hz = atoi(getenv("A7Z_BAND"));
 	if (getenv("A7Z_EXPSTEP")) g_expstep = 1;
 	if (getenv("A7Z_EXPLAT")) g_explat = atoi(getenv("A7Z_EXPLAT"));
 	meta_open();
