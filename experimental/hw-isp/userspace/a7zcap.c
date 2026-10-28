@@ -260,6 +260,16 @@ static long g_af_frames = 0; static int g_af_trace = 0;
 // The capture buffers are uncached DMA memory: reading them pixel by pixel from the CPU is slow (and on a little core it made each AF frame take 100-400 ms, so
 // the driver dropped 1 frame in 2 to 1 in 8). Copy the region once with row memcpy, hand the buffer back, then score the cached copy.
 static unsigned char *g_roi; static size_t g_roi_cap;
+// Autofocus region: half the frame in each direction, centred on (g_afcx, g_afcy) as fractions of the frame (default 0.5, 0.5 = the centre half).
+// `tap X Y` in the control file moves it (tap-to-focus); the box is pushed back inside the frame instead of shrinking.
+static double g_afcx = 0.5, g_afcy = 0.5;
+static void roi_box(int gw, int gh, int *x0, int *x1, int *y0, int *y1)
+{
+	int hw = gw / 4, hh = gh / 4, cx = (int)(g_afcx * gw), cy = (int)(g_afcy * gh);
+	if (cx < hw + 1) cx = hw + 1; if (cx > gw - hw - 2) cx = gw - hw - 2;
+	if (cy < hh + 1) cy = hh + 1; if (cy > gh - hh - 2) cy = gh - hh - 2;
+	*x0 = cx - hw; *x1 = cx + hw; *y0 = cy - hh; *y1 = cy + hh;
+}
 static double grab_sharp(int skip, int avg)
 {
 	double sh = 0; int got = 0;
@@ -271,7 +281,7 @@ static double grab_sharp(int skip, int avg)
 		if (ioctl(g_fd, VIDIOC_DQBUF, &bb) < 0) break;
 		g_af_frames++; seq_track(bb.sequence);
 		if (g_af_trace) { struct timespec tq; clock_gettime(CLOCK_MONOTONIC, &tq); fprintf(stderr, "%ld seq%u ts%ld ", (long)(tq.tv_sec % 100 * 1000 + tq.tv_nsec / 1000000), bb.sequence, (long)(bb.timestamp.tv_sec % 100 * 1000 + bb.timestamp.tv_usec / 1000)); }
-		int have = n >= skip, x0 = g_gw / 4, x1 = g_gw * 3 / 4, y0 = g_gh / 4, y1 = g_gh * 3 / 4;
+		int have = n >= skip, x0, x1, y0, y1; roi_box(g_gw, g_gh, &x0, &x1, &y0, &y1);
 		if (have) {
 			int w = x1 - x0 + 2, h = y1 - y0 + 2;
 			if ((size_t)w * h > g_roi_cap) { g_roi_cap = (size_t)w * h; g_roi = realloc(g_roi, g_roi_cap); }
@@ -692,6 +702,14 @@ static void ctl_poll(void)
 				if (!strcmp(verb, "gain")) g_force_gain = (int)arg; else if (!strcmp(verb, "exp")) g_force_exp = (int)arg; else g_force_gain = g_force_exp = 0;
 				if (g_fd >= 0 && g_last_eg.exp_val > 0) { struct sensor_exp_gain e = g_last_eg; ioctl(g_fd, VIDIOC_VIN_SENSOR_EXP_GAIN, &e); }   // our own ioctl() above applies the pinned values
 				fprintf(stderr, "[a7zcap] CTL %s: gain %d exp %d us (0 = libisp's choice)\n", verb, g_force_gain, g_force_exp);
+			} else if (!strcmp(verb, "lock")) {
+				g_af_paused = 1; fprintf(stderr, "[a7zcap] CTL focus locked at %.2f dpt\n", g_af_dpt);
+			} else if (!strcmp(verb, "tap")) {       // tap X Y (fractions 0..1 of the frame): focus on that spot and hold; `tap` alone returns to the centre
+				double x = 0.5, y = 0.5; int k = sscanf(line, "%*s %lf %lf", &x, &y);
+				if (k < 2) { x = y = 0.5; }
+				g_afcx = x < 0 ? 0 : x > 1 ? 1 : x; g_afcy = y < 0 ? 0 : y > 1 ? 1 : y;
+				g_af_paused = 0; autofocus(1); g_af_paused = 1;
+				fprintf(stderr, "[a7zcap] CTL tap-to-focus at (%.2f, %.2f) -> %.2f dpt (held)\n", g_afcx, g_afcy, g_af_dpt);
 			} else if (!strcmp(verb, "af")) {
 				sscanf(line, "%*s %31s", word);
 				if (!strcmp(word, "auto")) { g_af_paused = 0; fprintf(stderr, "[a7zcap] CTL autofocus resumed\n"); }
@@ -993,7 +1011,7 @@ int main(int argc, char **argv)
 		if (g_block_isp_lens) {
 			// refocus watcher: every 3rd frame, score a cached copy of the centre region (never the uncached buffer itself), hand the buffer back first
 			static int low = 0, since = 0, rebase = 4, tick = 0, skipcheck = 0, futile = 0, defer = 0, nh = 0; static double hist[6];
-			int x0 = gw / 4, x1 = gw * 3 / 4, y0 = gh / 4, y1 = gh * 3 / 4, rw = x1 - x0 + 2, rh = y1 - y0 + 2, docheck = (++tick % 2) == 0;
+			int x0, x1, y0, y1; roi_box(gw, gh, &x0, &x1, &y0, &y1); int rw = x1 - x0 + 2, rh = y1 - y0 + 2, docheck = (++tick % 2) == 0;
 			if (docheck) {
 				if ((size_t)rw * rh > g_roi_cap) { g_roi_cap = (size_t)rw * rh; g_roi = realloc(g_roi, g_roi_cap); }
 				for (int r = 0; r < rh; r++) memcpy(g_roi + (size_t)r * rw, mp[b.index][0] + (size_t)(y0 - 1 + r) * gw + (x0 - 1), rw);

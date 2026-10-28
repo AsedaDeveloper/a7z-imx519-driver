@@ -62,3 +62,13 @@ wrapper around it, and anything that can write a file can drive the lens.
 The same control file takes `exp <microseconds>`, `gain <code>` (16 = 1x) and `free`. `a7zcap` rewrites the exposure/gain command on its way to the sensor and re-issues the last one at once, so the
 change lands within a few frames (4 frames of pipeline latency, METADATA.md). `free` hands control back to libisp's auto exposure on its next request. Verified: `gain 32 / 128 / 256 / 512` came back in the
 per-frame metadata as exactly 32 / 128 / 256 / 512, `exp 10000` as 10000 us. Leave a second between writes (the file's mtime has one-second resolution).
+
+## Focus lock and tap-to-focus (checklist C6)
+Control-file verbs: `lock` holds the lens where it is (same as `focus_automatic_continuous=0` on the loopback node); `tap X Y` focuses on a spot (X, Y as 0..1 fractions of the frame, 0,0 = top left),
+runs one autofocus on a box the size of the normal centre region (half the frame each way) centred there, and holds the result; `tap` with no numbers goes back to the centre; `af auto` resumes
+continuous autofocus. The box is pushed back inside the frame at the edges rather than shrunk, so a tap in a corner still scores a full-size region. The refocus watcher uses the same box.
+
+Measured Oct 28 on a real scene with depth: taps at (0.2,0.5) / (0.8,0.5) / (0.5,0.2) / (0.5,0.8) / (0.2,0.2) / (0.8,0.8) / centre settled at 7.55 / 9.11 / 8.61 / 7.57 / 7.48 / 7.81 / 7.64 dpt,
+and tapping the same spot twice gave 7.55 and 7.59 (0.04 dpt apart). So the spot decides where it focuses and it repeats. Not tested against known distances (that is C5).
+
+**AF assist in the dark: not possible.** The A7Z has no light source for the camera. The only help is what autofocus already does: a shorter exposure with more gain while it sweeps (`A7Z_AF_EXPDIV`, `A7Z_AF_GAINMAX`).
