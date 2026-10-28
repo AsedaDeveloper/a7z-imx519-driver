@@ -32,7 +32,7 @@ not listed here has not been measured. The running tally is in [CHECKLIST.md](CH
 ## Known not to work, or not done
 | Thing | State |
 |---|---|
-| Raw Bayer capture on this path | the ISP path lists Bayer formats but streams none; raw lives in the main repo's bypass driver, which cannot run at the same time |
+| Raw Bayer capture on this path | the ISP path lists Bayer formats but streams none; on the vendor kernel with the bypass overlay (ISP off) the raw formats are accepted but streaming hangs the board (C1, Oct 28); raw works in the main repo's driver on the 6.6 kernel |
 | Phase-detect autofocus | the receiver carries one RAW10 stream on virtual channel 0, no embedded or vendor data type, in two modes (4 to 9 million packet samples) — [LINK.md](LINK.md) |
 | Tuning the ISP's stages beyond on / off | the flags are named, but what each number inside the tone-mapping, sharpen and denoise arrays does is unknown; the V4L2 user controls (`sharpness`, `contrast` ...) are inert — [tuning/ISP_STAGES.md](tuning/ISP_STAGES.md) |
 | NPU | device node present, no userspace runtime installed |
