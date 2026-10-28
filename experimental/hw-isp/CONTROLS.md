@@ -57,3 +57,8 @@ So focus goes through a one-line command file instead (`A7Z_CTL`, default `/run/
 wrapper around it, and anything that can write a file can drive the lens.
 
 **B2 is now answered at the loopback node (above); the kernel driver itself is untouched.**
+
+## Pinning exposure and gain (for measurements)
+The same control file takes `exp <microseconds>`, `gain <code>` (16 = 1x) and `free`. `a7zcap` rewrites the exposure/gain command on its way to the sensor and re-issues the last one at once, so the
+change lands within a few frames (4 frames of pipeline latency, METADATA.md). `free` hands control back to libisp's auto exposure on its next request. Verified: `gain 32 / 128 / 256 / 512` came back in the
+per-frame metadata as exactly 32 / 128 / 256 / 512, `exp 10000` as 10000 us. Leave a second between writes (the file's mtime has one-second resolution).

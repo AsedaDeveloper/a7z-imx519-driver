@@ -146,6 +146,8 @@ static int g_hae_exp = 0, g_hae_gain = 0;
 static double g_rmul = 1.0, g_bmul = 1.0;   // A7Z_RMUL / A7Z_BMUL: scale the ISP's final white-balance gains (r_gain/b_gain) on their way to the driver
 static int g_maxexp = 0, g_maxgain = 512;   // A7Z_MAXEXP (us) / A7Z_MAXGAIN: global exposure cap for a smooth frame rate in dim light
 static int g_af_expdiv = 1, g_af_gainmax = 256;   // A7Z_AF_EXPDIV / A7Z_AF_GAINMAX: exposure cap during autofocus
+static int g_force_gain = 0, g_force_exp = 0;   // control file "gain N" / "exp N" (us): pin what is sent to the sensor, whatever libisp asks for ("free" lets it ask again)
+static struct sensor_exp_gain g_last_eg;
 static __thread int g_my_lens_call = 0;
 int ioctl(int fd, unsigned long req, ...)
 {
@@ -177,6 +179,9 @@ int ioctl(int fd, unsigned long req, ...)
 			fprintf(stderr, "[a7zcap] STEP call seq=%u exp=%d gain=%d half=%d\n", g_seq_last, eg->exp_val, eg->gain_val, tog);
 		}
 		if (g_rmul != 1.0 || g_bmul != 1.0) { eg->r_gain = (int)(eg->r_gain * g_rmul + 0.5); eg->b_gain = (int)(eg->b_gain * g_bmul + 0.5); }
+		if (g_force_exp > 0) eg->exp_val = g_force_exp;
+		if (g_force_gain > 0) eg->gain_val = g_force_gain;
+		g_last_eg = *eg;
 		{ unsigned i = g_eh_n; g_eh[i % MH] = (struct mexp){ g_seq_last, eg->exp_val, eg->gain_val, eg->r_gain, eg->b_gain }; g_eh_n = i + 1; }
 		if (getenv("A7Z_EXPLOG")) fprintf(stderr, "[a7zcap] EXPGAIN exp=%d gain=%d r=%d b=%d\n", eg->exp_val, eg->gain_val, eg->r_gain, eg->b_gain);
 	}
@@ -683,6 +688,10 @@ static void ctl_poll(void)
 				sscanf(line, "%*s %31s", word);
 				g_af_paused = 1; g_af_dpt = arg; set_lens(af_code(arg));
 				fprintf(stderr, "[a7zcap] CTL focus %.2f dpt (autofocus held)\n", arg);
+			} else if (!strcmp(verb, "gain") || !strcmp(verb, "exp") || !strcmp(verb, "free")) {
+				if (!strcmp(verb, "gain")) g_force_gain = (int)arg; else if (!strcmp(verb, "exp")) g_force_exp = (int)arg; else g_force_gain = g_force_exp = 0;
+				if (g_fd >= 0 && g_last_eg.exp_val > 0) { struct sensor_exp_gain e = g_last_eg; ioctl(g_fd, VIDIOC_VIN_SENSOR_EXP_GAIN, &e); }   // our own ioctl() above applies the pinned values
+				fprintf(stderr, "[a7zcap] CTL %s: gain %d exp %d us (0 = libisp's choice)\n", verb, g_force_gain, g_force_exp);
 			} else if (!strcmp(verb, "af")) {
 				sscanf(line, "%*s %31s", word);
 				if (!strcmp(word, "auto")) { g_af_paused = 0; fprintf(stderr, "[a7zcap] CTL autofocus resumed\n"); }
