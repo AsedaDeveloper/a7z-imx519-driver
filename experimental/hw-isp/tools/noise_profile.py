@@ -11,7 +11,8 @@ sys.path.insert(0, "/usr/local/lib")
 from a7z_v4l2 import Camera
 exp = int(sys.argv[1]) if len(sys.argv) > 1 else 30000
 nfr = int(sys.argv[2]) if len(sys.argv) > 2 else 40
-GAINS = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512]
+GAINS = ([int(g) for g in sys.argv[3].split(',')] if len(sys.argv) > 3
+         else [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512])
 W, H = 1920, 1080
 GRID = [(r * W + c) for r in range(60, H - 60, 24) for c in range(60, W - 60, 24)]
 def ctl(s): open("/run/a7zcam.ctl", "w").write(s + "\n")
