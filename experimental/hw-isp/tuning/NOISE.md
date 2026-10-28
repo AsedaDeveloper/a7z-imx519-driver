@@ -28,14 +28,10 @@ In practice: stay at or below 16x (gain code 256) unless the frame is worth a no
 * One scene, one session, one module.
 * Not done for B14: lens shading, colour matrix per illuminant, the tone curve, and noise reduction strength per ISO (the dynamic per-ISO block is not decoded).
 
-## Dark frames (lens covered, Oct 28, 30 ms)
-| gain | x | mean Y | max-ish: min Y | temporal std |
-|---|---|---|---|---|
-| 16-48 | 1-3 | 0.0 | 0 | 0.00 |
-| 64-256 | 4-16 | 0.0 | 0 | 0.03-0.36 (a few pixels flicker above 0) |
-| 384 | 24 | **73.1** | 8.4 | 7.1 dark / 46.7 mid |
-| 512 | 32 | **173.3** | 70.6 | 11.3 |
+## Dark frames (lens sealed, Oct 28, 30 ms)
+Output is **0.0 with zero temporal noise at every gain tested: 16x to 24x in 1x steps, and 32x**. Sealed meaning light-tight; a 16x row of 0.0 was the check that the lens really was dark.
 
-Up to 16x the ISP's black level sits at or above the sensor's dark level: the output is clamped to 0, so **no black-level figure can be read from the output** (the pedestal is hidden, not zero).
-At 24x and 32x a covered lens gives a bright, noisy image. That is not light (16x is black), so the digital-gain path above 16x lifts a pedestal or fixed pattern far above the clamp, and the picture is unusable.
-**Unconfirmed (Oct 28): two later reruns of 16x-24x could not reproduce a clean dark baseline (one was uncovered, one showed a mean of 24 at 16x, so light was reaching the sensor), and the 24x/32x pedestal above may have been light or the cover shifting during the run. Treat it as an open question until a run reads 0.0 at 16x and then continues up.** Cause not isolated: a missing black-level subtraction in the digital-gain range, or a gain-dependent offset in the param file, are both candidates. Dark frames at 20-23x would place the threshold.
+* An earlier "covered" run showed means of 73 (24x) and 173 (32x), and two reruns showed a smooth rise with gain (24-41). Those were light reaching the sensor or the cover shifting, **not** a pedestal: the sealed run
+  disproves it. The 24x/32x noise jump in the lit table above is therefore ordinary amplified scene noise, not a black-level fault.
+* Because the output clamps to 0, the ISP's black level sits at or above the sensor's dark level at every gain. That makes dark noise unmeasurable from the output (it is hidden below the clamp, not zero), and the
+  real sensor black level is not recoverable here. A raw-Bayer dump would be needed for it.
